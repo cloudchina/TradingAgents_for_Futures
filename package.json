@@ -1,0 +1,12 @@
+{
+  "name": "futures-trading-web",
+  "version": "2.0.0",
+  "private": true,
+  "description": "商品期货 Trading Agents 系统",
+  "scripts": {
+    "start": "node start.js",
+    "dev": "node start.js",
+    "dev:frontend": "cd frontend && npm run dev",
+    "dev:backend": "cd backend && python3 -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload"
+  }
+}

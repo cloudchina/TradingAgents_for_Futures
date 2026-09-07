@@ -1,0 +1,250 @@
+# 商品期货品种配置
+# 用户可直接编辑此文件增删品种，程序会自动读取
+# dominant_contract 字段会由程序自动更新（通过 akshare 获取主力合约）
+
+commodities:
+  # ── 上海期货交易所 (SHFE) ──
+  - symbol: CU
+    name: 沪铜
+    exchange: SHFE
+    category: 有色金属
+  - symbol: AL
+    name: 沪铝
+    exchange: SHFE
+    category: 有色金属
+  - symbol: ZN
+    name: 沪锌
+    exchange: SHFE
+    category: 有色金属
+  - symbol: PB
+    name: 沪铅
+    exchange: SHFE
+    category: 有色金属
+  - symbol: NI
+    name: 沪镍
+    exchange: SHFE
+    category: 有色金属
+  - symbol: SN
+    name: 沪锡
+    exchange: SHFE
+    category: 有色金属
+  - symbol: AO
+    name: 氧化铝
+    exchange: SHFE
+    category: 有色金属
+  - symbol: AU
+    name: 沪金
+    exchange: SHFE
+    category: 贵金属
+  - symbol: AG
+    name: 沪银
+    exchange: SHFE
+    category: 贵金属
+  - symbol: RB
+    name: 螺纹钢
+    exchange: SHFE
+    category: 黑色系
+  - symbol: HC
+    name: 热卷
+    exchange: SHFE
+    category: 黑色系
+  - symbol: SS
+    name: 不锈钢
+    exchange: SHFE
+    category: 黑色系
+  - symbol: BU
+    name: 沥青
+    exchange: SHFE
+    category: 能源化工
+  - symbol: FU
+    name: 燃料油
+    exchange: SHFE
+    category: 能源化工
+  - symbol: RU
+    name: 橡胶
+    exchange: SHFE
+    category: 能源化工
+  - symbol: SP
+    name: 纸浆
+    exchange: SHFE
+    category: 能源化工
+  - symbol: BR
+    name: 丁二烯橡胶
+    exchange: SHFE
+    category: 能源化工
+
+  # ── 上海国际能源交易中心 (INE) ──
+  - symbol: SC
+    name: 原油
+    exchange: INE
+    category: 能源化工
+  - symbol: LU
+    name: 低硫燃料油
+    exchange: INE
+    category: 能源化工
+  - symbol: NR
+    name: 20号胶
+    exchange: INE
+    category: 能源化工
+  - symbol: BC
+    name: 国际铜
+    exchange: INE
+    category: 有色金属
+
+  # ── 大连商品交易所 (DCE) ──
+  - symbol: A
+    name: 豆一
+    exchange: DCE
+    category: 农产品
+  - symbol: B
+    name: 豆二
+    exchange: DCE
+    category: 农产品
+  - symbol: M
+    name: 豆粕
+    exchange: DCE
+    category: 农产品
+  - symbol: Y
+    name: 豆油
+    exchange: DCE
+    category: 农产品
+  - symbol: P
+    name: 棕榈油
+    exchange: DCE
+    category: 农产品
+  - symbol: C
+    name: 玉米
+    exchange: DCE
+    category: 农产品
+  - symbol: CS
+    name: 玉米淀粉
+    exchange: DCE
+    category: 农产品
+  - symbol: JD
+    name: 鸡蛋
+    exchange: DCE
+    category: 农产品
+  - symbol: LH
+    name: 生猪
+    exchange: DCE
+    category: 农产品
+  - symbol: L
+    name: 聚乙烯
+    exchange: DCE
+    category: 能源化工
+  - symbol: V
+    name: PVC
+    exchange: DCE
+    category: 能源化工
+  - symbol: PP
+    name: 聚丙烯
+    exchange: DCE
+    category: 能源化工
+  - symbol: EG
+    name: 乙二醇
+    exchange: DCE
+    category: 能源化工
+  - symbol: EB
+    name: 苯乙烯
+    exchange: DCE
+    category: 能源化工
+  - symbol: PG
+    name: 液化石油气
+    exchange: DCE
+    category: 能源化工
+  - symbol: J
+    name: 焦炭
+    exchange: DCE
+    category: 黑色系
+  - symbol: JM
+    name: 焦煤
+    exchange: DCE
+    category: 黑色系
+  - symbol: I
+    name: 铁矿石
+    exchange: DCE
+    category: 黑色系
+
+  # ── 郑州商品交易所 (CZCE) ──
+  - symbol: SR
+    name: 白糖
+    exchange: CZCE
+    category: 农产品
+  - symbol: CF
+    name: 棉花
+    exchange: CZCE
+    category: 农产品
+  - symbol: CY
+    name: 棉纱
+    exchange: CZCE
+    category: 农产品
+  - symbol: AP
+    name: 苹果
+    exchange: CZCE
+    category: 农产品
+  - symbol: CJ
+    name: 红枣
+    exchange: CZCE
+    category: 农产品
+  - symbol: RM
+    name: 菜粕
+    exchange: CZCE
+    category: 农产品
+  - symbol: OI
+    name: 菜籽油
+    exchange: CZCE
+    category: 农产品
+  - symbol: PK
+    name: 花生
+    exchange: CZCE
+    category: 农产品
+  - symbol: TA
+    name: PTA
+    exchange: CZCE
+    category: 能源化工
+  - symbol: MA
+    name: 甲醇
+    exchange: CZCE
+    category: 能源化工
+  - symbol: FG
+    name: 玻璃
+    exchange: CZCE
+    category: 能源化工
+  - symbol: SA
+    name: 纯碱
+    exchange: CZCE
+    category: 能源化工
+  - symbol: UR
+    name: 尿素
+    exchange: CZCE
+    category: 能源化工
+  - symbol: PF
+    name: 短纤
+    exchange: CZCE
+    category: 能源化工
+  - symbol: PX
+    name: 对二甲苯
+    exchange: CZCE
+    category: 能源化工
+  - symbol: SH
+    name: 烧碱
+    exchange: CZCE
+    category: 能源化工
+  - symbol: SF
+    name: 硅铁
+    exchange: CZCE
+    category: 黑色系
+  - symbol: SM
+    name: 锰硅
+    exchange: CZCE
+    category: 黑色系
+
+  # ── 广州期货交易所 (GFEX) ──
+  - symbol: SI
+    name: 工业硅
+    exchange: GFEX
+    category: 有色金属
+  - symbol: LC
+    name: 碳酸锂
+    exchange: GFEX
+    category: 有色金属

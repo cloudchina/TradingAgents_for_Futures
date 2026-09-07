@@ -1,0 +1,35 @@
+# 依赖与构建产物
+node_modules/
+dist/
+build/
+*.tsbuildinfo
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+*.egg-info/
+
+# 环境变量（含密钥，禁止提交）
+.env
+.env.*
+!.env.example
+!**/.env.example
+
+# 运行时数据 / 日志 / 自动生成配置
+backend/data/
+data/
+logs/
+*.log
+backend/config/dominant_contracts.yaml
+
+# 操作系统
+.DS_Store
+Thumbs.db
+
+# IDE / 编辑器
+.trae/
+.vscode/
+.idea/

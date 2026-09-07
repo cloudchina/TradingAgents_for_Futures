@@ -1,0 +1,61 @@
+version: "3.8"
+
+services:
+  # 后端服务
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: futures-backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - DASHSCOPE_API_KEY=${DASHSCOPE_API_KEY:-}
+      - BAILIAN_BASE_URL=${BAILIAN_BASE_URL:-https://llm-4l8sihiptwf8zykd.cn-beijing.maas.aliyuncs.com/compatible-mode/v1}
+      - SERPER_API_KEY=${SERPER_API_KEY:-}
+      - TIAN_API_KEY=${TIAN_API_KEY:-}
+      - SMTP_HOST=${SMTP_HOST:-}
+      - SMTP_PORT=${SMTP_PORT:-465}
+      - SMTP_USER=${SMTP_USER:-}
+      - SMTP_PASSWORD=${SMTP_PASSWORD:-}
+      - SMTP_FROM=${SMTP_FROM:-}
+      - SMTP_TO=${SMTP_TO:-}
+      - DEBUG=false
+      - DATA_ROOT_DIR=/app/data/qihuo/database
+      - CACHE_DIR=/app/data/qihuo/cache/analysis
+      - RESULTS_DIR=/app/data/qihuo/trading_agents_results
+      - LOGS_DIR=/app/data/logs
+    volumes:
+      # 数据持久化（数据库、缓存、日志）
+      - futures-data:/app/data
+    networks:
+      - futures-net
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/system/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # 前端服务
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: futures-frontend
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+    networks:
+      - futures-net
+
+volumes:
+  futures-data:
+    driver: local
+
+networks:
+  futures-net:
+    driver: bridge
