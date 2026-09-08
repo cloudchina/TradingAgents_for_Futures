@@ -1,6 +1,7 @@
 """品种配置服务 - 管理品种列表和主力合约映射"""
 import os
 import yaml
+import pandas as pd
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any
@@ -138,11 +139,14 @@ class CommodityService:
         刷新“当前主力合约”（真实具体合约，如 RB2510）。
 
         与“连续合约/主连”(RB0) 严格区分——本方法只确认并保存真实主力合约：
-        1. 用当日（最近一个能取到数据的交易日）行情快照 futures_spot_price 获取全部品种真实主力合约，
-           结果同步写入本地主力合约库 <main_contract>/<SYMBOL>/dominant_contract.csv（目录自动创建），
+        1. 用当日（最近一个能取到数据的交易日）行情快照 futures_spot_price（生意社/100ppi）
+           获取全部品种真实主力合约；
+        2. 生意社未收录的品种（如 AO 氧化铝、SC 原油、B 豆二等）由新浪财经
+           futures_zh_realtime 补种：取该品种全部挂牌合约中“持仓量最大的真实合约”为主力；
+        3. 结果同步写入本地主力合约库 <main_contract>/<SYMBOL>/dominant_contract.csv（目录自动创建），
            供持仓席位/换月复权等模块复用；
-        2. 联网失败则回退本地主力合约库各品种最新记录；
-        3. 仍未取得则保留旧 yaml 缓存。
+        4. 联网失败则回退本地主力合约库各品种最新记录；
+        5. 仍未取得则保留旧 yaml 缓存。
         """
         configured = set(self.get_symbols())
         try:
@@ -176,6 +180,14 @@ class CommodityService:
                 online, snapshot_date = tmp, date_str
                 break
 
+        # 新浪财经补种：生意社未收录品种按“持仓量最大真实合约”确认主力
+        missing_symbols = [s for s in configured if s not in online]
+        if missing_symbols:
+            sina_contracts = self._fetch_missing_from_sina(missing_symbols)
+            for symbol, contract in sina_contracts.items():
+                if contract and symbol not in online:
+                    online[symbol] = contract
+
         if online and snapshot_date:
             # 快照写回本地主力合约库（自动创建目录），供其它模块复用
             sync = self._main_contract_store()
@@ -186,7 +198,12 @@ class CommodityService:
                 except Exception:
                     pass
             logger.info(f"从 {snapshot_date} 行情快照确认 {len(online)} 个品种的真实主力合约"
-                        f"（已写入本地主力合约库 {saved} 条）")
+                        f"（含新浪补种 {len(sina_contracts) if missing_symbols else 0} 个，"
+                        f"已写入本地主力合约库 {saved} 条）")
+            contracts = online
+        elif online:
+            # 生意社连续失败、仅新浪可用：只更新缓存，不写本地库（无法确定对应交易日）
+            logger.warning("生意社行情快照不可用，仅用新浪实时行情更新主力合约缓存")
             contracts = online
         else:
             logger.warning("行情快照获取失败，回退本地主力合约库最新记录")
@@ -199,6 +216,79 @@ class CommodityService:
         else:
             logger.error("未能确认任何品种的主力合约")
         return contracts
+
+    # ---------- 新浪财经补充源（生意社/100ppi 未收录的品种） ----------
+
+    # 新浪期货行情列表的品种名与 commodities.yaml 的 name 不一致时的修正表
+    _SINA_CN_NAME_FIX = {"AP": "鲜苹果"}
+
+    def _fetch_missing_from_sina(self, symbols: List[str]) -> Dict[str, str]:
+        """
+        对生意社(100ppi)未收录的品种，用新浪财经实时行情确认“当前主力合约”。
+
+        新浪 futures_zh_realtime 返回某品种全部挂牌合约并按持仓量(position)降序排列；
+        其中 symbol 形如 XX0 的行是主连/连续行情，需剔除；随后从真实合约中取持仓量
+        最大的一个作为主力（真实具体合约，如 AO2601 / SC2610）。
+
+        Args:
+            symbols: 待补种品种代码列表（大写）
+
+        Returns:
+            成功确认的 {symbol: contract}；无法确认的品种不出现在结果中。
+        """
+        if not symbols:
+            return {}
+        try:
+            import akshare as ak
+            from modules.main_contract_sync import normalize_contract
+        except ImportError:
+            return {}
+
+        name_map = {
+            c["symbol"]: c.get("name", "")
+            for c in self._load_config().get("commodities", [])
+        }
+        exchange_map = {
+            c["symbol"]: c.get("exchange", "")
+            for c in self._load_config().get("commodities", [])
+        }
+
+        result: Dict[str, str] = {}
+        for symbol in symbols:
+            name = self._SINA_CN_NAME_FIX.get(symbol) or name_map.get(symbol)
+            if not name:
+                continue
+            try:
+                df = ak.futures_zh_realtime(symbol=name)
+            except Exception as e:
+                logger.warning(f"新浪获取 {symbol}({name}) 行情失败: {e}")
+                continue
+            if df is None or df.empty:
+                continue
+            candidates = []
+            for _, row in df.iterrows():
+                code = str(row.get("symbol", "") or "").strip()
+                digits = "".join(ch for ch in code if ch.isdigit())
+                if digits == "0":
+                    continue  # XX0 主连/连续行情行，非真实合约
+                pos = pd.to_numeric(row.get("position"), errors="coerce")
+                if pd.isna(pos):
+                    continue
+                candidates.append((float(pos), code))
+            if not candidates:
+                continue
+            candidates.sort(key=lambda x: x[0], reverse=True)
+            contract = normalize_contract(candidates[0][1])
+            if not contract:
+                continue
+            # 与生意社快照的落盘风格保持一致：上期所/大商所小写，其余大写
+            if exchange_map.get(symbol) in ("SHFE", "DCE"):
+                contract = contract.lower()
+            result[symbol] = contract
+
+        if result:
+            logger.info(f"新浪实时行情确认 {len(result)} 个品种的主力合约: {result}")
+        return result
 
     def ensure_data_directories(self, base_dir: Path, modules: List[str] = None):
         """确保所有品种的数据目录存在"""
