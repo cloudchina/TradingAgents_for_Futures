@@ -17,7 +17,7 @@ async def get_system_status() -> Dict[str, Any]:
     """获取系统状态"""
     runner = get_scheduled_runner()
     # 🔧 修复(B4)：品种数量统一取自 commodities.yaml（59），
-    # 此前 settings.SUPPORTED_COMMODITIES 硬编码 36 个，与 /api/data 数据品种不一致。
+    # 此前 core/settings.py 曾硬编码 36 个（该字段已在 B5 中删除），与 /api/data 数据品种不一致。
     configured_symbols = commodity_service.get_symbols()
     return {
         "bailian_api_configured": bool(settings.DASHSCOPE_API_KEY and settings.DASHSCOPE_API_KEY != "your_dashscope_api_key_here"),

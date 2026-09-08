@@ -43,7 +43,10 @@ async def lifespan(app: FastAPI):
     logger.info("🚀 商品期货 Trading Agents 后端启动中...")
     logger.info(f"  数据目录: {settings.DATA_ROOT_DIR}")
     logger.info(f"  缓存目录: {settings.CACHE_DIR}")
-    logger.info(f"  支持品种数: {len(settings.SUPPORTED_COMMODITIES)}")
+    # 🔧 修复(B5)：支持品种数以 commodities.yaml 为唯一来源（与 /api/data、/api/system
+    # 一致），此前 core/settings.py 曾硬编码 36 个，该字段已在 B5 中一并删除。
+    from services.commodity_service import commodity_service
+    logger.info(f"  支持品种数: {len(commodity_service.get_symbols())}（commodities.yaml）")
 
     # 确保目录存在
     for d in [settings.DATA_ROOT_DIR, settings.CACHE_DIR, settings.LOGS_DIR, settings.RESULTS_DIR]:

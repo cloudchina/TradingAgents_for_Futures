@@ -1,7 +1,6 @@
 """应用配置管理"""
 import os
 from pathlib import Path
-from typing import Dict, List, Optional, Any
 from pydantic_settings import BaseSettings
 from pydantic import Field
 
@@ -41,46 +40,6 @@ class Settings(BaseSettings):
     MAX_NEWS_PER_CATEGORY: int = Field(default=50, description="每类最大新闻数")
     REQUEST_DELAY: float = Field(default=1.0, description="API请求间隔(秒)")
 
-    # 支持的期货品种
-    SUPPORTED_COMMODITIES: Dict[str, Any] = Field(default_factory=lambda: {
-        "铜": {"symbol": "CU", "exchange": "SHFE", "category": "有色金属"},
-        "铝": {"symbol": "AL", "exchange": "SHFE", "category": "有色金属"},
-        "锌": {"symbol": "ZN", "exchange": "SHFE", "category": "有色金属"},
-        "铅": {"symbol": "PB", "exchange": "SHFE", "category": "有色金属"},
-        "镍": {"symbol": "NI", "exchange": "SHFE", "category": "有色金属"},
-        "锡": {"symbol": "SN", "exchange": "SHFE", "category": "有色金属"},
-        "黄金": {"symbol": "AU", "exchange": "SHFE", "category": "贵金属"},
-        "白银": {"symbol": "AG", "exchange": "SHFE", "category": "贵金属"},
-        "螺纹钢": {"symbol": "RB", "exchange": "SHFE", "category": "黑色系"},
-        "热卷": {"symbol": "HC", "exchange": "SHFE", "category": "黑色系"},
-        "铁矿石": {"symbol": "I", "exchange": "DCE", "category": "黑色系"},
-        "焦炭": {"symbol": "J", "exchange": "DCE", "category": "黑色系"},
-        "焦煤": {"symbol": "JM", "exchange": "DCE", "category": "黑色系"},
-        "原油": {"symbol": "SC", "exchange": "INE", "category": "能源化工"},
-        "燃料油": {"symbol": "FU", "exchange": "SHFE", "category": "能源化工"},
-        "沥青": {"symbol": "BU", "exchange": "SHFE", "category": "能源化工"},
-        "橡胶": {"symbol": "RU", "exchange": "SHFE", "category": "能源化工"},
-        "豆粕": {"symbol": "M", "exchange": "DCE", "category": "农产品"},
-        "豆油": {"symbol": "Y", "exchange": "DCE", "category": "农产品"},
-        "棕榈油": {"symbol": "P", "exchange": "DCE", "category": "农产品"},
-        "玉米": {"symbol": "C", "exchange": "DCE", "category": "农产品"},
-        "白糖": {"symbol": "SR", "exchange": "CZCE", "category": "农产品"},
-        "棉花": {"symbol": "CF", "exchange": "CZCE", "category": "农产品"},
-        "PTA": {"symbol": "TA", "exchange": "CZCE", "category": "能源化工"},
-        "甲醇": {"symbol": "MA", "exchange": "CZCE", "category": "能源化工"},
-        "玻璃": {"symbol": "FG", "exchange": "CZCE", "category": "能源化工"},
-        "纯碱": {"symbol": "SA", "exchange": "CZCE", "category": "能源化工"},
-        "尿素": {"symbol": "UR", "exchange": "CZCE", "category": "能源化工"},
-        "苹果": {"symbol": "AP", "exchange": "CZCE", "category": "农产品"},
-        "红枣": {"symbol": "CJ", "exchange": "CZCE", "category": "农产品"},
-        "菜粕": {"symbol": "RM", "exchange": "CZCE", "category": "农产品"},
-        "菜籽油": {"symbol": "OI", "exchange": "CZCE", "category": "农产品"},
-        "烧碱": {"symbol": "SH", "exchange": "CZCE", "category": "能源化工"},
-        "对二甲苯": {"symbol": "PX", "exchange": "CZCE", "category": "能源化工"},
-        "氧化铝": {"symbol": "AO", "exchange": "SHFE", "category": "有色金属"},
-        "丁二烯橡胶": {"symbol": "BR", "exchange": "SHFE", "category": "能源化工"},
-    })
-
     class Config:
         env_file = ".env"
         case_sensitive = True
@@ -102,16 +61,3 @@ def get_results_path(*parts: str) -> Path:
 def get_cache_path(*parts: str) -> Path:
     """获取缓存目录下的路径"""
     return Path(settings.CACHE_DIR) / Path(*parts)
-
-
-def get_all_symbols() -> List[str]:
-    """获取所有支持的品种代码"""
-    return [info["symbol"] for info in settings.SUPPORTED_COMMODITIES.values()]
-
-
-def get_symbol_name(symbol: str) -> str:
-    """根据代码获取品种名称"""
-    for name, info in settings.SUPPORTED_COMMODITIES.items():
-        if info["symbol"] == symbol.upper():
-            return name
-    return symbol.upper()
