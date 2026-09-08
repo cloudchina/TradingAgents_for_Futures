@@ -39,8 +39,11 @@ export const dataApi = {
   refreshDominantContracts: () => api.post('/data/dominant-contracts/refresh'),
   getVarieties: (moduleKey) => api.get(`/data/varieties/${moduleKey}`),
   checkCommodity: (commodity) => api.get(`/data/commodity/${commodity}`),
+  // 🔧 修复(C1)：数据更新已任务化——提交后立即返回 task_id，通过 getDataTask 轮询
   updateData: (moduleKey, params = {}) =>
     api.post(`/data/update/${moduleKey}`, null, { params }),
+  listDataTasks: () => api.get('/data/tasks'),
+  getDataTask: (taskId) => api.get(`/data/tasks/${taskId}`),
 }
 
 // ====== 分析 API ======

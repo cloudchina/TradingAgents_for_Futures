@@ -13,6 +13,7 @@ import time
 import random
 import json
 from typing import Dict, List, Optional, Tuple
+from modules.progress import ProgressReporter
 
 # 品种映射配置
 SYMBOL_MAPPING = {
@@ -34,7 +35,7 @@ SYMBOL_MAPPING = {
     'SC': '原油', 'BC': '国际铜'
 }
 
-class InventoryDataUpdater:
+class InventoryDataUpdater(ProgressReporter):
     """库存数据更新器"""
     
     def __init__(self, database_path: str = "qihuo/database/inventory"):
@@ -288,6 +289,7 @@ class InventoryDataUpdater:
         processed_count = 0
         
         for i, (symbol, series_cn) in enumerate(target_symbols):
+            self._report_progress("处理品种(东财库存)", i + 1, len(target_symbols), symbol)
             print(f"\n[{i+1}/{len(target_symbols)}] 处理品种: {symbol} ({series_cn})")
             
             # 获取品种数据

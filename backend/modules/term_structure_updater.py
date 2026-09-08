@@ -16,6 +16,7 @@ import warnings
 import re
 import requests
 from typing import Dict, List, Optional, Tuple
+from modules.progress import ProgressReporter
 
 warnings.filterwarnings('ignore')
 
@@ -48,7 +49,7 @@ _EM_DCE_MARKET_ID = "114"
 # 旧版本误存的“主力连续”脏行，如 EG0 / JD0 / MA0（单行非期限结构）
 _CONTINUOUS_SYMBOL_RE = re.compile(r'^[A-Za-z]+0$')
 
-class TermStructureUpdater:
+class TermStructureUpdater(ProgressReporter):
     """期限结构数据更新器"""
     
     def __init__(self, database_path: str = "qihuo/database/term_structure"):
@@ -770,7 +771,8 @@ class TermStructureUpdater:
         # 按交易所获取数据
         all_variety_data = {}
         
-        for exchange in self.exchanges:
+        for _ex_i, exchange in enumerate(self.exchanges, 1):
+            self._report_progress("拉取交易所行情", _ex_i, len(self.exchanges), exchange["name"])
             print(f"\n🔄 处理 {exchange['name']}...")
             
             # 获取交易所数据
@@ -803,7 +805,8 @@ class TermStructureUpdater:
         print(f"\n💾 保存各品种数据...")
         processed_count = 0
         
-        for variety, data_list in all_variety_data.items():
+        for _sv_i, (variety, data_list) in enumerate(all_variety_data.items(), 1):
+            self._report_progress("计算并保存期限结构", _sv_i, len(all_variety_data), variety)
             print(f"\n  处理品种: {variety}")
             
             try:

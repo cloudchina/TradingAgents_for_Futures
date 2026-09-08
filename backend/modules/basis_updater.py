@@ -13,8 +13,9 @@ import time
 import random
 import json
 from typing import Dict, List, Optional, Tuple
+from modules.progress import ProgressReporter
 
-class BasisDataUpdater:
+class BasisDataUpdater(ProgressReporter):
     """基差数据更新器"""
     
     def __init__(self, database_path: str = None):
@@ -363,6 +364,7 @@ class BasisDataUpdater:
         total_attempts = 0
         
         for i, date_str in enumerate(update_dates):
+            self._report_progress("拉取期现基差(按交易日)", i + 1, len(update_dates), date_str)
             print(f"\n[{i+1}/{len(update_dates)}] 处理日期: {date_str}")
             total_attempts += 1
             

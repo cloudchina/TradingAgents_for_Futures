@@ -15,6 +15,7 @@ import random
 import json
 import warnings
 from typing import Dict, List, Optional, Tuple
+from modules.progress import ProgressReporter
 # 注：全部技术指标（MA/EMA/ATR/RSI/MACD/布林带/KDJ/CCI/OBV 等）均使用 pandas/numpy 实现，
 # 不依赖 TA-Lib（原提示“talib 未安装指标将跳过”是历史误报，已移除）
 warnings.filterwarnings('ignore')
@@ -33,7 +34,7 @@ SYMBOL_MAPPING = {
     'Y': 'y2409', 'ZN': 'zn2411'
 }
 
-class TechnicalDataUpdater:
+class TechnicalDataUpdater(ProgressReporter):
     """技术分析数据更新器"""
     
     def __init__(self, database_path: str = "qihuo/database/technical_analysis"):
@@ -855,6 +856,7 @@ class TechnicalDataUpdater:
         processed_count = 0
         
         for i, symbol in enumerate(target_symbols):
+            self._report_progress("处理品种(交易所K线)", i + 1, len(target_symbols), symbol)
             print(f"\n[{i+1}/{len(target_symbols)}] 处理品种: {symbol}")
             
             contract_name = SYMBOL_MAPPING[symbol]

@@ -15,6 +15,7 @@ import random
 import json
 import warnings
 from typing import Dict, List, Optional, Tuple
+from modules.progress import ProgressReporter
 
 warnings.filterwarnings('ignore')
 
@@ -63,7 +64,7 @@ def _normalize_contract_code(code: str) -> str:
     return "".join(ch for ch in str(code) if ch.isalnum()).upper()
 
 
-class PositioningDataUpdater:
+class PositioningDataUpdater(ProgressReporter):
     """持仓数据更新器"""
     
     def __init__(self, database_path: str = "qihuo/database/positioning"):
@@ -253,7 +254,8 @@ class PositioningDataUpdater:
         total_requests = 0
         successful_requests = 0
         
-        for symbol, contracts_dict in dominant_contracts.items():
+        for _sf_i, (symbol, contracts_dict) in enumerate(dominant_contracts.items(), 1):
+            self._report_progress("新浪成交持仓", _sf_i, len(dominant_contracts), symbol)
             print(f"\n    🔍 处理品种: {symbol} ({SYMBOL_NAMES.get(symbol, symbol)})")
             
             symbol_data = []
@@ -368,6 +370,9 @@ class PositioningDataUpdater:
             return {}
 
         sync = self._main_contract_sync()
+        # 任务式更新时透传进度回调，让“联网确认主力合约”阶段也能展示进度
+        if getattr(self, "_progress_cb", None):
+            sync._progress_cb = self._progress_cb
         return sync.ensure(valid_symbols, trading_dates)
 
     def load_dominant_contracts_from_basis(self, start_date: datetime, target_date: datetime) -> Dict[str, Dict[str, str]]:
@@ -813,8 +818,9 @@ class PositioningDataUpdater:
 
         result: Dict[str, Dict[str, list]] = {}
 
-        for date_str in trading_dates:
+        for _dd_i, date_str in enumerate(trading_dates, 1):
             date_display = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]}"
+            self._report_progress("大商所官方排名(按交易日)", _dd_i, len(trading_dates), date_display)
             # 该交易日需要的主合约（仅取目标品种）
             needed = {}
             for symbol in symbols:
@@ -1128,7 +1134,8 @@ class PositioningDataUpdater:
         print(f"\n💾 开始保存品种数据...")
 
         # 3. 保存新浪链路数据（DataFrame 列表 -> 分类型 CSV）
-        for symbol, symbol_data in all_positioning_data.items():
+        for _sa_i, (symbol, symbol_data) in enumerate(all_positioning_data.items(), 1):
+            self._report_progress("保存持仓数据(新浪链路)", _sa_i, max(len(all_positioning_data), 1), symbol)
             print(f"\n  处理品种: {symbol} ({SYMBOL_NAMES.get(symbol, symbol)})")
 
             if symbol_data:
@@ -1145,7 +1152,8 @@ class PositioningDataUpdater:
                 self.update_stats["failed_varieties"].append(symbol)
 
         # 4. 保存大商所链路数据（会员对象列表 -> 分类型 CSV，自动增量合并去重）
-        for symbol, new_data in dce_positioning_data.items():
+        for _dp_i, (symbol, new_data) in enumerate(dce_positioning_data.items(), 1):
+            self._report_progress("保存持仓数据(大商所链路)", _dp_i, max(len(dce_positioning_data), 1), symbol)
             print(f"\n  处理品种: {symbol} ({SYMBOL_NAMES.get(symbol, symbol)})")
 
             has_rows = any(new_data.get(k) for k in ("long_positions", "short_positions", "volume_rankings"))

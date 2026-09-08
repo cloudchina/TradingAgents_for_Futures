@@ -25,6 +25,7 @@ from typing import Dict, List, Optional, Tuple
 
 import akshare as ak
 import pandas as pd
+from modules.progress import ProgressReporter
 
 
 def normalize_contract(raw) -> Optional[str]:
@@ -86,7 +87,7 @@ def _to_compact(date_value) -> str:
         return None
 
 
-class MainContractSync:
+class MainContractSync(ProgressReporter):
     """主力合约本地库：本地优先，缺失联网补齐并落盘"""
 
     def __init__(self, data_root: Optional[Path] = None):
@@ -262,7 +263,13 @@ class MainContractSync:
         dates_still_missing = sorted({
             d for symbol in symbols for d in missing_by_symbol[symbol]
         })
-        for date_compact in dates_still_missing:
+        for _dc_i, date_compact in enumerate(dates_still_missing, 1):
+            self._report_progress(
+                "联网确认主力合约(100ppi)",
+                _dc_i,
+                len(dates_still_missing),
+                f"{date_compact[:4]}-{date_compact[4:6]}-{date_compact[6:]}",
+            )
             online = self._fetch_online_by_date(date_compact)
             if not online:
                 print(f"      ⚠️ {date_compact}: 联网未获取到主力合约数据")

@@ -20,6 +20,7 @@ from datetime import datetime, timedelta
 import time
 import random
 from typing import Dict, List, Optional, Tuple
+from modules.progress import ProgressReporter
 
 # 品种映射配置（与库存相同）
 SYMBOL_MAPPING = {
@@ -105,7 +106,7 @@ def _weekdays_until(end: datetime, count: int) -> List[str]:
     return [d.strftime('%Y%m%d') for d in days]
 
 
-class ReceiptDataUpdater:
+class ReceiptDataUpdater(ProgressReporter):
     """仓单数据更新器"""
 
     def __init__(self, database_path: str = "qihuo/database/receipt"):
@@ -419,6 +420,7 @@ class ReceiptDataUpdater:
 
         # 更新每个品种
         for idx, (symbol, series_cn, exchange) in enumerate(supported, 1):
+            self._report_progress("处理品种(交易所仓单)", idx, len(supported), symbol)
             print(f"\n[{idx}/{len(supported)}] 处理品种: {symbol} ({series_cn}, {exchange})")
             print("-" * 80)
 

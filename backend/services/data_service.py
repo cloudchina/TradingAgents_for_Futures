@@ -6,7 +6,7 @@ import importlib
 import inspect
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Callable
 from loguru import logger
 
 from core.settings import settings
@@ -233,8 +233,17 @@ class DataManagerService:
         module_key: str,
         target_date: str = None,
         varieties: List[str] = None,
+        progress_cb: Optional[Callable[[str, int, int, str], None]] = None,
     ) -> UpdateResult:
-        """运行数据更新（非交互式，直接调用 Updater 类）"""
+        """运行数据更新（非交互式，直接调用 Updater 类）。
+
+        Args:
+            module_key: 模块 key
+            target_date: 目标日期 YYYY-MM-DD
+            varieties: 品种代码列表；None 表示更新全部配置品种
+            progress_cb: 可选进度回调 cb(stage, done, total, current)；
+                         由任务服务注入，供各 Updater 通过 ProgressReporter 上报
+        """
         config = MODULE_CONFIG.get(module_key)
         if not config:
             return UpdateResult(status="error", message=f"未知模块: {module_key}")
@@ -259,6 +268,9 @@ class DataManagerService:
 
             db_path = str(self._module_path(config))
             updater = updater_class(database_path=db_path)
+            # 任务式更新：注入进度回调（各 Updater 均继承 modules.progress.ProgressReporter）
+            if progress_cb is not None:
+                updater._progress_cb = progress_cb
 
             if not hasattr(updater, "update_to_date"):
                 return UpdateResult(
