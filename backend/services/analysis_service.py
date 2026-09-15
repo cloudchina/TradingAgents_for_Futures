@@ -12,6 +12,7 @@ import pandas as pd
 from loguru import logger
 
 from core.settings import settings
+from core.llm_config import llm_config
 from models.analysis import (
     AnalysisRequest, AnalysisTask, AnalysisProgress,
     AnalysisStatus, AnalysisMode, CacheMeta
@@ -50,6 +51,15 @@ def _normalize_date_value(value: Any) -> str:
     if len(s) == 8 and s.isdigit():
         return f"{s[:4]}-{s[4:6]}-{s[6:]}"
     return s
+
+
+def _resolve_model(task: "AnalysisTask") -> str:
+    """模型优先级：任务显式指定 > LLM 运行时配置（前端页面） > 兜底 qwen-plus。
+
+    任务里 ai_model 为空表示“跟随全局配置”，这样前端「LLM 配置」页面改模型后
+    无需重启、也无需改分析表单即可生效。
+    """
+    return llm_config.resolve_model(task.config.get("ai_model"))
 
 
 class AnalysisManager:
@@ -289,7 +299,7 @@ class AnalysisManager:
     def _run_debate(self, commodity: str, modules: Dict, task: AnalysisTask) -> Dict[str, Any]:
         """运行多空辩论 - 调用 DebateOrchestrator"""
         max_rounds = task.config.get("debate_rounds", 3)
-        model = task.config.get("ai_model", "qwen-plus")
+        model = _resolve_model(task)
         orch = DebateOrchestrator(
             model=model,
             max_rounds=max_rounds,
@@ -311,7 +321,7 @@ class AnalysisManager:
 
     def _run_trader(self, commodity: str, modules: Dict, debate: Dict, task: AnalysisTask) -> Dict[str, Any]:
         """运行交易员分析 - 单 agent ReAct"""
-        model = task.config.get("ai_model", "qwen-plus")
+        model = _resolve_model(task)
         agent = self._make_agent("Trader", TRADER_PROMPT, model)
         # 给 trader 看辩论摘要（避免 prompt 过长）
         debate_summary = {
@@ -332,7 +342,7 @@ class AnalysisManager:
 
     def _run_risk_management(self, commodity: str, trader_result: Dict, task: AnalysisTask) -> Dict[str, Any]:
         """运行风控管理 - 单 agent ReAct"""
-        model = task.config.get("ai_model", "qwen-plus")
+        model = _resolve_model(task)
         agent = self._make_agent("RiskManager", RISK_MANAGER_PROMPT, model)
         user_msg = (
             f"品种: {commodity}\n"
@@ -346,7 +356,7 @@ class AnalysisManager:
 
     def _run_executive_decision(self, commodity: str, trader: Dict, risk: Dict, task: AnalysisTask) -> Dict[str, Any]:
         """运行CIO最终决策 - 单 agent ReAct（不调工具，纯推理）"""
-        model = task.config.get("ai_model", "qwen-plus")
+        model = _resolve_model(task)
         # CIO 不需要工具，纯推理
         agent = ReActAgent(
             role_name="Executive",

@@ -62,11 +62,15 @@
           </el-form-item>
 
           <el-form-item label="AI模型">
-            <el-select v-model="form.aiModel" style="width: 200px">
-              <el-option label="Qwen Plus (推荐)" value="qwen-plus" />
-              <el-option label="Qwen Max (最强)" value="qwen-max" />
-              <el-option label="Qwen Turbo (快速)" value="qwen-turbo" />
+            <el-select v-model="form.aiModel" filterable allow-create style="width: 260px">
+              <el-option :label="`跟随LLM配置（${store.defaultModel}）`" value="" />
+              <el-option label="Qwen Plus" value="qwen-plus" />
+              <el-option label="Qwen Max" value="qwen-max" />
+              <el-option label="Qwen Turbo" value="qwen-turbo" />
             </el-select>
+            <span style="margin-left: 8px; color: #909399; font-size: 12px">
+              默认跟随「LLM 配置」页面的模型，可在此单独指定
+            </span>
           </el-form-item>
 
           <el-form-item label="强制重新分析">
@@ -126,7 +130,8 @@
           </el-form-item>
 
           <el-form-item label="AI模型">
-            <el-select v-model="scheduledForm.ai_model" style="width: 200px">
+            <el-select v-model="scheduledForm.ai_model" filterable allow-create style="width: 260px">
+              <el-option :label="`跟随LLM配置（${store.defaultModel}）`" value="" />
               <el-option label="Qwen Plus" value="qwen-plus" />
               <el-option label="Qwen Max" value="qwen-max" />
               <el-option label="Qwen Turbo" value="qwen-turbo" />
@@ -217,7 +222,7 @@ const form = reactive({
   analysisDate: new Date(Date.now() - 86400000).toISOString().split('T')[0],
   analysisMode: 'complete_flow',
   debateRounds: 3,
-  aiModel: 'qwen-plus',
+  aiModel: '', // 空 = 跟随「LLM 配置」页面的全局模型
   forceRefresh: false,
 })
 
@@ -228,7 +233,7 @@ const scheduledForm = reactive({
   analysis_modules: ['inventory', 'positioning', 'term_structure', 'technical', 'basis', 'news'],
   analysis_mode: 'complete_flow',
   debate_rounds: 3,
-  ai_model: 'qwen-plus',
+  ai_model: '', // 空 = 跟随「LLM 配置」页面的全局模型
   auto_email: false,
   auto_word: false,
   update_data_before_analysis: true,
@@ -297,7 +302,7 @@ function resetForm() {
   form.commodityInput = 'AU'
   form.analysisMode = 'complete_flow'
   form.debateRounds = 3
-  form.aiModel = 'qwen-plus'
+  form.aiModel = ''
   form.forceRefresh = false
 }
 
@@ -334,6 +339,7 @@ async function stopScheduled() {
 }
 
 onMounted(async () => {
+  await store.fetchLlmConfig()
   await store.fetchScheduledConfig()
   const cfg = store.scheduledConfig
   if (cfg.commodities?.length) {
@@ -343,7 +349,7 @@ onMounted(async () => {
     scheduledForm.analysis_modules = cfg.analysis_modules || scheduledForm.analysis_modules
     scheduledForm.analysis_mode = cfg.analysis_mode || 'complete_flow'
     scheduledForm.debate_rounds = cfg.debate_rounds ?? 3
-    scheduledForm.ai_model = cfg.ai_model || 'qwen-plus'
+    scheduledForm.ai_model = cfg.ai_model ?? ''
     scheduledForm.auto_email = cfg.auto_email ?? false
     scheduledForm.auto_word = cfg.auto_word ?? false
     // 🔧 修复：回填自动更新数据开关，此前该字段被忽略导致展示与后端配置不一致

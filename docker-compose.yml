@@ -13,6 +13,10 @@ services:
     environment:
       - DASHSCOPE_API_KEY=${DASHSCOPE_API_KEY:-}
       - BAILIAN_BASE_URL=${BAILIAN_BASE_URL:-https://llm-4l8sihiptwf8zykd.cn-beijing.maas.aliyuncs.com/compatible-mode/v1}
+      # 默认模型（前端「LLM 配置」页面保存后会写入下面的配置文件，优先级更高）
+      - LLM_MODEL=${LLM_MODEL:-qwen-plus}
+      # 落在 futures-data 命名卷内，容器重建不丢失
+      - LLM_CONFIG_PATH=/app/data/config/llm_config.json
       - SERPER_API_KEY=${SERPER_API_KEY:-}
       - TIAN_API_KEY=${TIAN_API_KEY:-}
       - SMTP_HOST=${SMTP_HOST:-}

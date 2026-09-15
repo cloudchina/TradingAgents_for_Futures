@@ -18,7 +18,8 @@ PROJECT_ROOT = Path(__file__).parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from core.settings import settings
-from routers import analysis, data, scheduled, system
+from core.llm_config import llm_config
+from routers import analysis, data, llm, scheduled, system
 
 
 # Windows 下若 stdout/stderr 非 UTF-8（如管道/重定向运行且代码页为 GBK），
@@ -47,6 +48,8 @@ async def lifespan(app: FastAPI):
     # 一致），此前 core/settings.py 曾硬编码 36 个，该字段已在 B5 中一并删除。
     from services.commodity_service import commodity_service
     logger.info(f"  支持品种数: {len(commodity_service.get_symbols())}（commodities.yaml）")
+    logger.info(f"  LLM 配置: {llm_config.describe()}（可在前端「LLM 配置」页面热更新）")
+    logger.info(f"  LLM 配置文件: {llm_config.config_path}")
 
     # 确保目录存在
     for d in [settings.DATA_ROOT_DIR, settings.CACHE_DIR, settings.LOGS_DIR, settings.RESULTS_DIR]:
@@ -78,6 +81,7 @@ app.include_router(system.router)
 app.include_router(data.router)
 app.include_router(analysis.router)
 app.include_router(scheduled.router)
+app.include_router(llm.router)
 
 
 @app.get("/")

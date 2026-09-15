@@ -1,2 +1,2 @@
 """路由包"""
-from . import analysis, data, scheduled, system
+from . import analysis, data, llm, scheduled, system

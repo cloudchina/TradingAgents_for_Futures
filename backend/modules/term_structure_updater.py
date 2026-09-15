@@ -661,6 +661,12 @@ class TermStructureUpdater(ProgressReporter):
                     # 合并新旧数据
                     combined_df = pd.concat([existing_df, filtered_new_data], ignore_index=True)
                     
+                    # 🔧 统一 date 为 8 位字符串（YYYYMMDD）：存量文件日期为纯数字落盘、
+                    # 读回被识别为 int64，而新抓取日期是 str，两者混排会导致
+                    # drop_duplicates 无法跨类型判重、sort_values 抛
+                    # "not supported between instances of 'int' and 'str'" 或静默错排。
+                    combined_df['date'] = combined_df['date'].astype(str).str.zfill(8)
+                    
                     # 去重（保留最新的）
                     combined_df = combined_df.drop_duplicates(subset=['date', 'symbol'], keep='last')
                     combined_df = combined_df.sort_values(['date', 'symbol'])

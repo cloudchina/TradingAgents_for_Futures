@@ -33,6 +33,10 @@
             <el-icon><Document /></el-icon>
             <span>分析结果</span>
           </el-menu-item>
+          <el-menu-item index="/llm">
+            <el-icon><Cpu /></el-icon>
+            <span>LLM 配置</span>
+          </el-menu-item>
         </el-menu>
       </el-aside>
       <el-main class="app-main">

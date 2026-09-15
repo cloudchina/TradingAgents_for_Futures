@@ -4,6 +4,7 @@ from typing import Dict, Any, List
 import os
 
 from core.settings import settings
+from core.llm_config import llm_config
 from services.cache_service import cache_service
 from services.commodity_service import commodity_service
 from services.scheduled_service import get_scheduled_runner
@@ -20,7 +21,9 @@ async def get_system_status() -> Dict[str, Any]:
     # 此前 core/settings.py 曾硬编码 36 个（该字段已在 B5 中删除），与 /api/data 数据品种不一致。
     configured_symbols = commodity_service.get_symbols()
     return {
-        "bailian_api_configured": bool(settings.DASHSCOPE_API_KEY and settings.DASHSCOPE_API_KEY != "your_dashscope_api_key_here"),
+        # 🔧 LLM 状态改以运行时配置为准（前端「LLM 配置」页面保存后立即反映）
+        "bailian_api_configured": llm_config.is_configured(),
+        "llm_model": llm_config.get().model,
         "serper_api_configured": bool(settings.SERPER_API_KEY and settings.SERPER_API_KEY != "your_serper_api_key_here"),
         "docx_available": word_report_service.available,
         "cache_count": cache_service.get_cache_count(),

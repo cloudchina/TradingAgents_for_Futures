@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
-import { systemApi, dataApi, analysisApi, scheduledApi } from '@/api'
+import { systemApi, dataApi, analysisApi, scheduledApi, llmApi } from '@/api'
 
 export const useAppStore = defineStore('app', () => {
   // 系统状态
@@ -30,6 +30,18 @@ export const useAppStore = defineStore('app', () => {
   // 缓存列表
   const cacheList = ref([])
 
+  // LLM 运行时配置（前端「LLM 配置」页面维护，保存后立即生效）
+  const llmConfig = ref({
+    base_url: '',
+    api_key: '',
+    api_key_masked: '',
+    model: '',
+    configured: false,
+    source: 'env',
+    config_path: '',
+    updated_at: '',
+  })
+
   // 定时分析配置
   const scheduledConfig = ref({
     enabled: false,
@@ -49,6 +61,8 @@ export const useAppStore = defineStore('app', () => {
 
   // 计算属性
   const availableCommodities = computed(() => dataStatus.value.summary.common_commodities || [])
+  // 全局默认模型：LLM 配置页未设置时兜底 qwen-plus
+  const defaultModel = computed(() => llmConfig.value.model || 'qwen-plus')
   const isAnalysisRunning = computed(() => analysisStatus.value.has_active_task && analysisStatus.value.status === 'running')
 
   // Actions
@@ -85,6 +99,39 @@ export const useAppStore = defineStore('app', () => {
     } catch (e) {
       console.error('获取缓存列表失败', e)
     }
+  }
+
+  // LLM 配置（读写 + 连通性测试）
+  async function fetchLlmConfig() {
+    try {
+      llmConfig.value = await llmApi.getConfig()
+      return llmConfig.value
+    } catch (e) {
+      console.error('获取 LLM 配置失败', e)
+      throw e
+    }
+  }
+
+  async function saveLlmConfig(config) {
+    const res = await llmApi.saveConfig(config)
+    if (res?.config) llmConfig.value = res.config
+    await fetchSystemStatus() // 右上角/系统状态里的 LLM 可用状态随之更新
+    return res
+  }
+
+  async function testLlmConfig(config) {
+    return await llmApi.test(config)
+  }
+
+  async function fetchLlmModels(config) {
+    return await llmApi.listModels(config)
+  }
+
+  async function resetLlmConfig() {
+    const res = await llmApi.reset()
+    if (res?.config) llmConfig.value = res.config
+    await fetchSystemStatus()
+    return res
   }
 
   async function fetchScheduledConfig() {
@@ -138,14 +185,21 @@ export const useAppStore = defineStore('app', () => {
     dataStatus,
     analysisStatus,
     cacheList,
+    llmConfig,
     scheduledConfig,
     loading,
     availableCommodities,
     isAnalysisRunning,
+    defaultModel,
     fetchSystemStatus,
     fetchDataStatus,
     fetchAnalysisStatus,
     fetchCacheList,
+    fetchLlmConfig,
+    saveLlmConfig,
+    testLlmConfig,
+    fetchLlmModels,
+    resetLlmConfig,
     fetchScheduledConfig,
     updateData,
     submitAnalysis,

@@ -13,7 +13,7 @@
     set SCHEDULED_UPDATE_DATA=false
     set SCHEDULED_AUTO_WORD=true
     set SCHEDULED_AUTO_EMAIL=true
-    set SCHEDULED_AI_MODEL=qwen-plus
+    set SCHEDULED_AI_MODEL=            （留空=跟随前端「LLM 配置」页面的全局模型）
     python run_scheduled_task.py
 
 运行前需配置系统环境变量：DASHSCOPE_API_KEY（模型）、如需发邮件再配置 SMTP_*，
@@ -50,7 +50,7 @@ def build_config_from_args(argv=None) -> ScheduledConfig:
     parser.add_argument("--commodities", help="品种代码，逗号分隔，如 AU,RB,I")
     parser.add_argument("--modules", help="分析模块，逗号分隔")
     parser.add_argument("--mode", choices=["complete_flow", "analyst_only"], default="complete_flow")
-    parser.add_argument("--ai-model", default="qwen-plus")
+    parser.add_argument("--ai-model", default="", help="留空表示跟随 LLM 运行时配置（前端「LLM 配置」页面）")
     parser.add_argument("--debate-rounds", type=int, default=3)
     parser.add_argument("--update-data", dest="update_data", action="store_true", default=None,
                         help="分析前自动更新数据")
@@ -76,7 +76,7 @@ def build_config_from_args(argv=None) -> ScheduledConfig:
     if modules_env:
         config_dict["analysis_modules"] = [m.strip() for m in modules_env.split(",") if m.strip()]
     config_dict.setdefault("analysis_mode", os.environ.get("SCHEDULED_MODE", "complete_flow"))
-    config_dict.setdefault("ai_model", os.environ.get("SCHEDULED_AI_MODEL", "qwen-plus"))
+    config_dict.setdefault("ai_model", os.environ.get("SCHEDULED_AI_MODEL", ""))
     config_dict.setdefault("debate_rounds", int(os.environ.get("SCHEDULED_DEBATE_ROUNDS", "3")))
     config_dict.setdefault("auto_word", _parse_bool(os.environ.get("SCHEDULED_AUTO_WORD", "false")))
     config_dict.setdefault("auto_email", _parse_bool(os.environ.get("SCHEDULED_AUTO_EMAIL", "false")))

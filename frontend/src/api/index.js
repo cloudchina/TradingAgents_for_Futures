@@ -46,6 +46,15 @@ export const dataApi = {
   getDataTask: (taskId) => api.get(`/data/tasks/${taskId}`),
 }
 
+// ====== LLM 配置 API（运行时热更新，保存后无需重启） ======
+export const llmApi = {
+  getConfig: () => api.get('/llm/config'),
+  saveConfig: (data) => api.put('/llm/config', data),
+  test: (data) => api.post('/llm/test', data),
+  listModels: (data) => api.post('/llm/models', data),
+  reset: () => api.post('/llm/reset'),
+}
+
 // ====== 分析 API ======
 // 🔧 清理(P2)：移除无调用封装 getProgress / getResult（结果页统一走 status + cache/list）
 export const analysisApi = {

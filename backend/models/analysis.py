@@ -52,7 +52,8 @@ class AnalysisRequest(BaseModel):
         default=AnalysisMode.COMPLETE_FLOW,
         description="分析模式"
     )
-    ai_model: str = Field(default="qwen-plus", description="AI模型")
+    # 留空表示“跟随全局配置”，即使用前端「LLM 配置」页面保存的模型
+    ai_model: str = Field(default="", description="AI模型，留空则跟随 LLM 运行时配置")
     use_realtime: bool = Field(default=True, description="使用实时数据")
     debate_rounds: int = Field(default=3, ge=0, le=5, description="辩论轮数")
     force_refresh: bool = Field(default=False, description="强制刷新缓存")
@@ -109,7 +110,8 @@ class ScheduledConfig(BaseModel):
     analysis_modules: List[str] = Field(default_factory=lambda: [m.value for m in AnalysisModule])
     analysis_mode: str = "complete_flow"
     debate_rounds: int = 3
-    ai_model: str = "qwen-plus"
+    # 留空表示“跟随全局配置”，即使用前端「LLM 配置」页面保存的模型
+    ai_model: str = ""
     use_realtime: bool = True
     auto_email: bool = False
     auto_word: bool = False

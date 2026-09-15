@@ -177,6 +177,11 @@ commodities:
 | POST | `/api/scheduled/start` | 启动定时分析 |
 | POST | `/api/scheduled/stop` | 停止定时分析 |
 | GET | `/api/scheduled/status` | 定时状态 |
+| GET | `/api/llm/config` | 查询当前 LLM 配置（Base URL / API Key / 模型） |
+| PUT | `/api/llm/config` | 保存 LLM 配置，**立即生效，无需重启** |
+| POST | `/api/llm/test` | 连通性测试（可传临时参数先试后存） |
+| POST | `/api/llm/models` | 拉取远端可用模型列表 |
+| POST | `/api/llm/reset` | 恢复为环境变量默认配置 |
 
 ## 🎯 功能模块
 
@@ -184,6 +189,30 @@ commodities:
 2. **数据更新** — 品种表格（代码/名称/交易所/主力合约/数据状态）、多选品种更新、6 模块一键更新
 3. **分析配置** — 手动分析（选品种/模块/模式/辩论轮数/AI模型）+ 自动定时分析
 4. **分析结果** — 实时进度、6 模块详情、多空辩论、交易员建议、风控意见、CIO 最终决策、Word 报告导出
+5. **LLM 配置** — 自定义 Base URL / API Key / 模型名称，支持连通性测试与模型列表拉取，保存后立即生效、无需重启
+
+## 🧠 LLM 配置（运行时热更新）
+
+侧边栏「LLM 配置」页可填写并保存：
+
+| 配置项 | 说明 | 示例 |
+|--------|------|------|
+| Base URL | OpenAI 兼容接口地址 | `https://dashscope.aliyuncs.com/compatible-mode/v1` |
+| API Key | 服务端密钥 | `sk-xxxx` |
+| 模型名称 | 可手输，也可点「拉取模型列表」选择 | `qwen-plus` |
+
+保存后后端会立即重建 LLM 客户端，**无需重启服务**；手动分析、多空辩论、定时分析都会使用新配置。
+分析配置页的「AI模型」默认为「跟随LLM配置」，如需单次任务单独指定模型可另行选择。
+
+配置持久化位置（两种部署模式均已支持）：
+
+| 部署模式 | 配置文件位置 |
+|----------|--------------|
+| 直接启动（`npm start`） | `backend/data/config/llm_config.json` |
+| Docker（`docker compose up`） | 容器内 `/app/data/config/llm_config.json`，落在 `futures-data` 命名卷中，容器重建/升级不丢失 |
+
+可用环境变量 `LLM_CONFIG_PATH` 覆盖配置文件路径；`LLM_MODEL` 指定默认模型。
+未保存过配置时，回退使用 `DASHSCOPE_API_KEY` / `BAILIAN_BASE_URL` / `LLM_MODEL`。
 
 ## 🔧 配置说明
 
@@ -191,7 +220,10 @@ commodities:
 
 | 变量 | 说明 | 默认值 |
 |------|------|--------|
-| `DASHSCOPE_API_KEY` | 百炼 API 密钥（必需） | - |
+| `DASHSCOPE_API_KEY` | 百炼 API 密钥（LLM 默认值，可被前端「LLM 配置」覆盖） | - |
+| `BAILIAN_BASE_URL` | 百炼 Base URL（同上） | 百炼兼容模式地址 |
+| `LLM_MODEL` | 默认模型名称 | `qwen-plus` |
+| `LLM_CONFIG_PATH` | LLM 运行时配置文件路径 | `<DATA_ROOT_DIR>/../config/llm_config.json` |
 | `SERPER_API_KEY` | Serper 搜索密钥（可选） | - |
 | `TIAN_API_KEY` | 天行 API Key（新闻检索，读**系统环境变量**，不写入代码库） | - |
 | `SMTP_HOST/PORT/USER/PASSWORD/FROM/TO` | SMTP 邮件配置（可选，用于定时分析 `auto_email`；写在 `backend/.env` 即可，无需系统环境变量） | - |

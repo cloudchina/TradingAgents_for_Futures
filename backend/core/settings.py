@@ -16,6 +16,13 @@ class Settings(BaseSettings):
     )
     SERPER_API_KEY: str = Field(default="", description="Serper API密钥")
 
+    # LLM 运行时配置（前端「LLM 配置」页面可热改，无配置时以下面三项为默认值）
+    LLM_MODEL: str = Field(default="qwen-plus", description="默认LLM模型名称")
+    LLM_CONFIG_PATH: str = Field(
+        default="",
+        description="LLM运行时配置文件路径，默认 <DATA_ROOT_DIR>/../config/llm_config.json",
+    )
+
     # SMTP 邮件配置（auto_email 自动发送使用；普通配置放 backend/.env 即可，系统环境变量可覆盖）
     SMTP_HOST: str = Field(default="", description="SMTP 服务器地址，如 smtp.qq.com")
     SMTP_PORT: int = Field(default=465, description="SMTP 端口（465=SSL；587/25=STARTTLS）")

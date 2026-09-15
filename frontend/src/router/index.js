@@ -29,6 +29,12 @@ const routes = [
     component: () => import('@/views/AnalysisResults.vue'),
     meta: { title: '分析结果' },
   },
+  {
+    path: '/llm',
+    name: 'LLMConfig',
+    component: () => import('@/views/LLMConfig.vue'),
+    meta: { title: 'LLM配置' },
+  },
 ]
 
 const router = createRouter({

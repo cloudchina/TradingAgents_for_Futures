@@ -374,7 +374,10 @@ class ReceiptDataUpdater(ProgressReporter):
 
         if not rows:
             return None
-        return pd.DataFrame(rows, columns=['date', 'receipt', 'change'])
+        result = pd.DataFrame(rows, columns=['date', 'receipt', 'change'])
+        # 统一 date 为 datetime，避免与本地存量文件（datetime）合并排序时出现 str 与 Timestamp 比较
+        result['date'] = pd.to_datetime(result['date'])
+        return result
 
     def update_to_date(self, target_date_str: str, specific_varieties: Optional[List[str]] = None) -> Dict:
         """

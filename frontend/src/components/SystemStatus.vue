@@ -1,11 +1,5 @@
 <template>
   <div class="system-status">
-    <el-tooltip content="百炼API" placement="bottom">
-      <el-tag :type="status.bailian_api_configured ? 'success' : 'danger'" size="small" effect="dark">
-        <el-icon><Cpu /></el-icon>
-        {{ status.bailian_api_configured ? 'LLM' : 'LLM✗' }}
-      </el-tag>
-    </el-tooltip>
     <el-tooltip content="Serper搜索API" placement="bottom">
       <el-tag :type="status.serper_api_configured ? 'success' : 'danger'" size="small" effect="dark">
         <el-icon><Search /></el-icon>
