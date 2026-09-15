@@ -49,6 +49,34 @@ _EM_DCE_MARKET_ID = "114"
 # 旧版本误存的“主力连续”脏行，如 EG0 / JD0 / MA0（单行非期限结构）
 _CONTINUOUS_SYMBOL_RE = re.compile(r'^[A-Za-z]+0$')
 
+
+def load_symbol_markets() -> Dict[str, str]:
+    """读取“品种代码 → 交易所代码”映射（单一数据源：backend/config/commodities.yaml）。
+
+    用途：指定品种更新时跳过无关交易所，避免全市场拉取。
+    读取失败返回空字典，调用方退化为扫描全部交易所（保守策略，不影响正确性）。
+    """
+    candidates = [
+        Path(__file__).resolve().parents[1] / "config" / "commodities.yaml",
+        Path(__file__).resolve().parents[2] / "config" / "commodities.yaml",
+    ]
+    for path in candidates:
+        if not path.exists():
+            continue
+        try:
+            import yaml
+
+            data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+            return {
+                str(c.get("symbol", "")).upper(): str(c.get("exchange", "")).upper()
+                for c in data.get("commodities", [])
+                if c.get("symbol") and c.get("exchange")
+            }
+        except Exception as e:  # noqa: BLE001
+            print(f"⚠️ 读取品种交易所映射失败（将扫描全部交易所）: {e}")
+            break
+    return {}
+
 class TermStructureUpdater(ProgressReporter):
     """期限结构数据更新器"""
     
@@ -435,13 +463,15 @@ class TermStructureUpdater(ProgressReporter):
         print(f"    ✅ {exchange['name']}: 获取到 {len(df)} 条原始记录")
         return df
     
-    def process_exchange_data(self, df: pd.DataFrame, exchange: Dict) -> Dict[str, pd.DataFrame]:
+    def process_exchange_data(self, df: pd.DataFrame, exchange: Dict,
+                              only_varieties: Optional[set] = None) -> Dict[str, pd.DataFrame]:
         """
         处理交易所数据，按品种分组
         
         Args:
             df: 原始数据
             exchange: 交易所配置
+            only_varieties: 只保留这些品种（None 表示全部）
         
         Returns:
             按品种分组的数据字典
@@ -499,6 +529,10 @@ class TermStructureUpdater(ProgressReporter):
                         continue
                     variety = match.group(1).upper()  # 提取字母部分作为品种代码
                     month_code = match.group(2)  # 提取月份代码
+
+                    # 指定品种更新时提前裁剪，避免对全市场品种做指标计算与日志输出
+                    if only_varieties is not None and variety not in only_varieties:
+                        continue
                     
                     # 标准化合约代码：郑商所3位月份补齐为4位
                     # 如FG511 → FG2511, AP603 → AP2603
@@ -774,11 +808,37 @@ class TermStructureUpdater(ProgressReporter):
         
         print(f"📅 更新日期范围: {start_date_str} - {end_date_str}")
         
+        # 确定本次实际品种范围：交易所官方接口一次返回该交易所全部品种，
+        # 因此“指定品种”必须在取数前就定位到相关交易所，否则会拉全市场。
+        only_varieties: Optional[set] = None
+        exchanges_to_scan = self.exchanges
+        if specific_varieties:
+            only_varieties = {str(v).strip().upper() for v in specific_varieties if str(v).strip()}
+            print(f"🎯 指定更新品种: {len(only_varieties)} 个 -> {', '.join(sorted(only_varieties))}")
+
+            symbol_markets = load_symbol_markets()
+            unknown = sorted(s for s in only_varieties if s not in symbol_markets)
+            if unknown:
+                print(f"⚠️ 以下品种未在 config/commodities.yaml 中配置，无法定位交易所，将扫描全部交易所: {', '.join(unknown)}")
+            else:
+                target_markets = {symbol_markets[s] for s in only_varieties}
+                exchanges_to_scan = [e for e in self.exchanges if e["market"] in target_markets]
+                skipped = [e for e in self.exchanges if e["market"] not in target_markets]
+                if skipped:
+                    print(f"⏭️ 本次品种只属于 {', '.join(e['name'] for e in exchanges_to_scan)}，"
+                          f"跳过无关交易所: {', '.join(e['name'] for e in skipped)}")
+                if not exchanges_to_scan:
+                    print("❌ 指定品种均无法匹配到受支持的交易所，终止更新")
+                    self.update_stats["end_time"] = datetime.now()
+                    return self.update_stats
+        else:
+            print("🎯 全品种更新")
+        
         # 按交易所获取数据
         all_variety_data = {}
         
-        for _ex_i, exchange in enumerate(self.exchanges, 1):
-            self._report_progress("拉取交易所行情", _ex_i, len(self.exchanges), exchange["name"])
+        for _ex_i, exchange in enumerate(exchanges_to_scan, 1):
+            self._report_progress("拉取交易所行情", _ex_i, len(exchanges_to_scan), exchange["name"])
             print(f"\n🔄 处理 {exchange['name']}...")
             
             # 获取交易所数据
@@ -788,7 +848,7 @@ class TermStructureUpdater(ProgressReporter):
                 continue
             
             # 处理数据
-            variety_data = self.process_exchange_data(exchange_df, exchange)
+            variety_data = self.process_exchange_data(exchange_df, exchange, only_varieties)
             
             # 合并到总数据中
             for variety, data_list in variety_data.items():

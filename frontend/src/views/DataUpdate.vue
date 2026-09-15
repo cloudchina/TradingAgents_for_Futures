@@ -66,6 +66,7 @@
             placeholder="默认全部品种"
             style="width: 400px"
             filterable
+            :reserve-keyword="false"
           >
             <el-option
               v-for="c in commodities"
@@ -106,7 +107,7 @@
           >
             {{ currentTask.status === 'running' ? '运行中' : (currentTask.status === 'success' ? '成功' : '失败') }}
           </el-tag>
-          <span class="task-title">{{ currentTask.module_name }} · {{ currentTask.task_id }}</span>
+          <span class="task-title">{{ currentTask.module_name }}</span>
           <el-button link type="primary" style="margin-left: auto" @click="dismissTask">隐藏</el-button>
         </div>
         <template v-if="currentTask.status === 'running'">

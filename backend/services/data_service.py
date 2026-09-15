@@ -290,9 +290,10 @@ class DataManagerService:
                 result = updater.update_to_date(target_date, varieties)
 
             if isinstance(result, dict):
-                updated = len(result.get("updated_varieties", []))
-                failed = len(result.get("failed_varieties", []))
-                skipped = len(result.get("skipped_varieties", []))
+                # 去重后计数：部分模块会按交易日多次保存同一品种，列表含重复项
+                updated = len(set(result.get("updated_varieties", [])))
+                failed = len(set(result.get("failed_varieties", [])))
+                skipped = len(set(result.get("skipped_varieties", [])))
                 total_new = result.get("total_new_records", 0)
                 errors = result.get("error_messages", [])
 

@@ -44,6 +44,12 @@ class BasisDataUpdater(ProgressReporter):
             "error_messages": []
         }
     
+    def _count_variety_once(self, key: str, variety: str) -> None:
+        """按品种去重累计：跨多交易日更新时同一品种只计一次"""
+        stats = self.update_stats.setdefault(key, [])
+        if variety not in stats:
+            stats.append(variety)
+
     def get_existing_data_status(self) -> Tuple[Optional[datetime], List[str], Dict]:
         """
         获取现有数据状态
@@ -252,13 +258,14 @@ class BasisDataUpdater(ProgressReporter):
                 combined_df = pd.concat([existing_df, new_data], ignore_index=True)
                 combined_df = combined_df.drop_duplicates(subset=['date']).sort_values('date').reset_index(drop=True)
                 
+                # 注：该字段命名为 new_records，实为“合并后相对旧文件的净增行数”
                 new_records = len(combined_df) - len(existing_df)
                 if new_records > 0:
                     print(f"    ✅ {variety}: 新增 {new_records} 条记录")
                     self.update_stats["total_new_records"] += new_records
                 else:
                     print(f"    ℹ️ {variety}: 无新数据")
-                    self.update_stats["skipped_varieties"].append(variety)
+                    self._count_variety_once("skipped_varieties", variety)
                     return True
             else:
                 combined_df = new_data
@@ -286,12 +293,12 @@ class BasisDataUpdater(ProgressReporter):
             with open(summary_file, 'w', encoding='utf-8') as f:
                 json.dump(summary_info, f, ensure_ascii=False, indent=2)
             
-            self.update_stats["updated_varieties"].append(variety)
+            self._count_variety_once("updated_varieties", variety)
             return True
             
         except Exception as e:
             print(f"    ❌ {variety}: 保存失败 - {str(e)}")
-            self.update_stats["failed_varieties"].append(variety)
+            self._count_variety_once("failed_varieties", variety)
             self.update_stats["error_messages"].append(f"{variety}: 保存失败 - {str(e)}")
             return False
     
@@ -357,7 +364,15 @@ class BasisDataUpdater(ProgressReporter):
             self.update_stats["end_time"] = datetime.now()
             return self.update_stats
         
-        print(f"📋 需要更新的日期: {update_dates}")
+        # 品种范围（接口一次返回当日全市场品种，因此“指定品种”需在逐行处理阶段过滤）
+        wanted: Optional[set] = None
+        if specific_varieties:
+            wanted = {str(v).strip().upper() for v in specific_varieties if str(v).strip()}
+            print(f"🎯 指定更新品种: {len(wanted)} 个 -> {', '.join(sorted(wanted))}")
+        else:
+            print("🎯 全品种更新")
+
+        print(f"📋 需要更新的日期: {len(update_dates)} 个交易日")
         
         # 执行更新
         success_count = 0
@@ -383,11 +398,14 @@ class BasisDataUpdater(ProgressReporter):
             
             for _, row in df.iterrows():
                 variety = str(row[variety_col]).upper()
-                variety_total += 1
                 
                 # 如果指定了品种，只处理指定的品种
-                if specific_varieties and variety not in specific_varieties:
+                if wanted is not None and variety not in wanted:
                     continue
+
+                # 分母只统计本次范围内的品种（接口返回的是全市场）
+                variety_total += 1
+                
                 
                 # 构造该品种的数据（使用正确的列名从akshare数据中获取）
                 variety_data = pd.DataFrame([{
