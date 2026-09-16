@@ -15,24 +15,24 @@ import random
 import json
 import warnings
 from typing import Dict, List, Optional, Tuple
+from loguru import logger
+
 from modules.progress import ProgressReporter
+from modules import variety_catalog
 # 注：全部技术指标（MA/EMA/ATR/RSI/MACD/布林带/KDJ/CCI/OBV 等）均使用 pandas/numpy 实现，
 # 不依赖 TA-Lib（原提示“talib 未安装指标将跳过”是历史误报，已移除）
 warnings.filterwarnings('ignore')
 
-# 品种合约映射
-SYMBOL_MAPPING = {
-    'A': 'a2409', 'AG': 'ag2412', 'AL': 'al2411', 'AO': 'ao2412', 'AP': 'AP501', 'AU': 'au2412', 'B': 'b2409',
-    'BU': 'bu2412', 'C': 'c2409', 'CF': 'CF409', 'CJ': 'CJ501', 'CS': 'cs2409', 'CU': 'cu2411', 'CY': 'CY409',
-    'EB': 'eb2411', 'EG': 'eg2411', 'FG': 'FG409', 'FU': 'fu2409', 'HC': 'hc2410',
-    'I': 'i2409', 'J': 'j2409', 'JD': 'jd2409', 'JM': 'jm2409', 'L': 'l2409',
-    'LC': 'lc2409', 'LG': 'LG501', 'LH': 'lh2409', 'LU': 'lu2409', 'M': 'm2409', 'MA': 'MA409', 'NI': 'ni2411', 'NR': 'nr2407',
-    'OI': 'OI409', 'P': 'p2409', 'PB': 'pb2411', 'PF': 'PF409', 'PG': 'pg2411', 'PK': 'PK409',
-    'PP': 'pp2409', 'PR': 'PR501', 'PS': 'ps2409', 'PX': 'PX409', 'RB': 'rb2410', 'RM': 'RM409', 'RS': 'RS501', 'RU': 'ru2409', 
-    'SA': 'SA409', 'SC': 'sc2412', 'SF': 'sf2411', 'SH': 'SH501', 'SI': 'si2409', 'SM': 'sm2409', 'SN': 'sn2411', 'SP': 'sp2409',
-    'SR': 'SR409', 'SS': 'ss2410', 'TA': 'TA409', 'UR': 'UR409', 'V': 'v2409',
-    'Y': 'y2409', 'ZN': 'zn2411'
-}
+# 品种清单兜底：仅在主力合约库为空且联网快照也失败时使用。
+# 注意：品种与主力合约本身由 MainContractSync 每日同步动态维护（data/qihuo/database/main_contract），
+# 这里刻意不再写死任何合约代码（历史上此处固化了一批 2024 年交割合约，早已失效）。
+FALLBACK_VARIETIES = [
+    'A', 'AG', 'AL', 'AO', 'AP', 'AU', 'B', 'BC', 'BR', 'BU', 'C', 'CF', 'CJ', 'CS', 'CU', 'EC',
+    'EB', 'EG', 'FG', 'FU', 'HC', 'I', 'J', 'JD', 'JM', 'L', 'LC', 'LH', 'LU',
+    'M', 'MA', 'NI', 'NR', 'OI', 'P', 'PB', 'PF', 'PG', 'PK', 'PP', 'PR', 'PS', 'PX',
+    'RB', 'RM', 'RU', 'SA', 'SC', 'SF', 'SH', 'SI', 'SM', 'SN', 'SP', 'SR', 'SS',
+    'TA', 'UR', 'V', 'Y', 'ZN',
+]
 
 class TechnicalDataUpdater(ProgressReporter):
     """技术分析数据更新器"""
@@ -46,6 +46,7 @@ class TechnicalDataUpdater(ProgressReporter):
         """
         self.base_dir = Path(database_path)
         self.base_dir.mkdir(parents=True, exist_ok=True)
+        self._variety_name_map: Optional[Dict[str, str]] = None  # 品种中文名缓存
         
         self.update_stats = {
             "start_time": None,
@@ -59,6 +60,37 @@ class TechnicalDataUpdater(ProgressReporter):
             "error_messages": []
         }
     
+    # ---------- 动态品种清单 / 中文名（不再写死合约） ----------
+
+    def _load_variety_name_map(self) -> Dict[str, str]:
+        """品种代码 -> 中文名，来自 commodities.yaml（用户可自行增删品种）。"""
+        if self._variety_name_map is not None:
+            return self._variety_name_map
+        # 唯一数据源：commodities.yaml（经由 modules/variety_catalog）
+        self._variety_name_map = dict(variety_catalog.name_map())
+        if not self._variety_name_map:
+            logger.warning("品种中文名配置不可用，回退内置映射")
+        return self._variety_name_map
+
+    def _dynamic_varieties(self, target_date: datetime) -> List[str]:
+        """动态品种清单：主力合约库（每日同步维护）优先，其次联网全市场主力合约快照。"""
+        try:
+            from modules.main_contract_sync import MainContractSync
+            symbols = MainContractSync(data_root=self.base_dir.parent).list_known_varieties(target_date)
+            if symbols:
+                logger.debug(f"品种清单来自主力合约库: {len(symbols)} 个")
+                return symbols
+        except Exception as e:
+            logger.warning(f"动态获取品种清单失败 - {str(e)[:60]}")
+
+        cfg_symbols = variety_catalog.symbols()
+        if cfg_symbols:
+            logger.info(f"品种清单来自 commodities.yaml: {len(cfg_symbols)} 个")
+            return cfg_symbols
+
+        logger.warning("主力合约库与配置均不可用，回退内置品种清单")
+        return list(FALLBACK_VARIETIES)
+
     def get_existing_data_status(self) -> Tuple[List[str], Dict]:
         """
         获取现有数据状态
@@ -67,7 +99,7 @@ class TechnicalDataUpdater(ProgressReporter):
             varieties: 现有品种列表
             variety_info: 各品种详细信息
         """
-        print("🔍 检查现有技术分析数据状态...")
+        logger.info("检查现有技术分析数据状态...")
         
         varieties = []
         variety_info = {}
@@ -76,7 +108,7 @@ class TechnicalDataUpdater(ProgressReporter):
             return [], {}
         
         variety_folders = [d for d in self.base_dir.iterdir() if d.is_dir()]
-        print(f"📂 发现 {len(variety_folders)} 个品种文件夹")
+        logger.info(f"发现 {len(variety_folders)} 个品种文件夹")
         
         for folder in variety_folders:
             variety = folder.name
@@ -99,22 +131,21 @@ class TechnicalDataUpdater(ProgressReporter):
                         }
                         
                         varieties.append(variety)
-                        print(f"  {variety}: {record_count} 条记录 ({variety_earliest.strftime('%Y-%m-%d')} ~ {variety_latest.strftime('%Y-%m-%d')})")
+                        logger.info(f"{variety}: {record_count} 条记录 ({variety_earliest.strftime('%Y-%m-%d')} ~ {variety_latest.strftime('%Y-%m-%d')})")
                         
                 except Exception as e:
-                    print(f"  ❌ {variety}: 读取失败 - {str(e)[:50]}")
+                    logger.error(f"{variety}: 读取失败 - {str(e)[:50]}")
                     self.update_stats["error_messages"].append(f"{variety}: 数据读取失败 - {str(e)}")
         
-        print(f"\n📊 总计: {len(varieties)} 个有效品种")
+        logger.info(f"总计: {len(varieties)} 个有效品种")
         return varieties, variety_info
     
-    def fetch_ohlc_data(self, symbol: str, contract_name: str, start_date: Optional[datetime] = None) -> Optional[pd.DataFrame]:
+    def fetch_ohlc_data(self, symbol: str, start_date: Optional[datetime] = None) -> Optional[pd.DataFrame]:
         """
-        获取OHLC数据 - 使用中文主连合约名称
+        获取OHLC数据 - 主连行情（不依赖具体合约代码，故无需传入写死的合约）
         
         Args:
             symbol: 品种代码
-            contract_name: 合约名称
             start_date: 开始日期（用于增量更新）
         
         Returns:
@@ -134,14 +165,14 @@ class TechnicalDataUpdater(ProgressReporter):
             "RU": "橡胶主连", "NR": "20号胶主连", "BU": "沥青主连", "FU": "燃油主连",
             "LU": "低硫燃油主连", "PG": "LPG主连", "EB": "苯乙烯主连", 
             "EG": "乙二醇主连", "MA": "甲醇主连", "TA": "PTA主连", "PX": "对二甲苯主连", 
-            "PL": "聚烯烃主连", "PF": "短纤主连", "CY": "棉纱主连", "PR": "瓶片主连",
+            "PF": "短纤主连", "PR": "瓶片主连", "EC": "集运欧线主连",
             "SH": "烧碱主连", "SC": "原油主连",
             # 农产品
             "SR": "白糖主连", "CF": "棉花主连", "AP": "苹果主连", "CJ": "红枣主连", 
             "SP": "纸浆主连", "P": "棕榈油主连", "Y": "豆油主连", "M": "豆粕主连", 
-            "RM": "菜粕主连", "OI": "菜油主连", "RS": "菜籽主连", "PK": "花生主连", 
+            "RM": "菜粕主连", "OI": "菜油主连", "PK": "花生主连", 
             "A": "豆一主连", "B": "豆二主连", "C": "玉米主连", "CS": "淀粉主连", 
-            "JD": "鸡蛋主连", "LH": "生猪主连", "LG": "原木主连",
+            "JD": "鸡蛋主连", "LH": "生猪主连",
             # 玻璃
             "FG": "玻璃主连", "SA": "纯碱主连",
             # 塑料
@@ -152,8 +183,10 @@ class TechnicalDataUpdater(ProgressReporter):
             "LC": "碳酸锂主连", "SI": "工业硅主连", "PS": "多晶硅主连"
         }
         
-        chinese_name = SYMBOL_TO_CHINESE.get(symbol, f"{symbol}主连")
-        print(f"  📡 获取 {symbol} ({chinese_name}) 的OHLC数据...")
+        # 中文名优先取 commodities.yaml（用户可增删品种），内置映射仅作兜底
+        base_name = self._load_variety_name_map().get(symbol) or SYMBOL_TO_CHINESE.get(symbol, symbol)
+        chinese_name = base_name if str(base_name).endswith("主连") else f"{base_name}主连"
+        logger.info(f"获取 {symbol} ({chinese_name}) 的OHLC数据...")
         
         # ============ 数据源策略（命中即返回，按可靠性排序）============
         #  ① 新浪主力连续 futures_main_sina —— symbol 必须传 "品种+0"(如 JD0)，一次请求全量
@@ -176,7 +209,7 @@ class TechnicalDataUpdater(ProgressReporter):
         # ---- ① 新浪主力连续（正确传 {symbol}0，可按窗口回填，重试1次） ----
         for attempt in range(2):
             try:
-                print(f"    📡 ① futures_main_sina({sina_symbol}) [{fetch_desc}]" + ("  → 重试" if attempt else ""))
+                logger.debug(f"① futures_main_sina({sina_symbol}) [{fetch_desc}]" + (" (重试)" if attempt else ""))
                 time.sleep(random.uniform(0.5, 1))
                 df = ak.futures_main_sina(symbol=sina_symbol, start_date=start_str,
                                           end_date=datetime.now().strftime('%Y%m%d'))
@@ -184,47 +217,47 @@ class TechnicalDataUpdater(ProgressReporter):
                 if df is not None and not df.empty:
                     processed_df = self._process_sina_main_data(df, symbol, start_date)
                     if not processed_df.empty:
-                        print(f"    ✅ 新浪主连成功: {len(processed_df)} 条记录")
+                        logger.debug(f"新浪主连成功: {len(processed_df)} 条记录")
                         return processed_df
-                print("    ⚠️ ① 新浪主连: 空数据/无新增")
+                logger.warning("① 新浪主连: 空数据/无新增")
             except Exception as e:
-                print(f"    ⚠️ ① 新浪主连: {str(e)[:60]}")
+                logger.warning(f"① 新浪主连: {str(e)[:60]}")
         
         # ---- ② 东方财富主连（中文名，单次尝试，避免被反爬时反复告警） ----
         try:
-            print(f"    📡 ② futures_hist_em({chinese_name}) [{fetch_desc}]")
+            logger.debug(f"② futures_hist_em({chinese_name}) [{fetch_desc}]")
             time.sleep(random.uniform(0.5, 1))
             df = ak.futures_hist_em(symbol=chinese_name, period="daily")
             
             if df is not None and not df.empty:
                 processed_df = self._process_em_data(df, symbol, start_date)
                 if not processed_df.empty:
-                    print(f"    ✅ 东方财富主连成功: {len(processed_df)} 条记录")
+                    logger.debug(f"东方财富主连成功: {len(processed_df)} 条记录")
                     return processed_df
-            print("    ⚠️ ② 东方财富主连: 空数据/无新增")
+            logger.warning("② 东方财富主连: 空数据/无新增")
         except Exception as e:
-            print(f"    ⚠️ ② 东方财富主连: {str(e)[:60]}")
+            logger.warning(f"② 东方财富主连: {str(e)[:60]}")
         
         # ---- ③ 兜底：交易所官方日报（逐日抓取，最慢） ----
         try:
-            print(f"    📡 ③ get_futures_daily(按交易所, 逐日回填)")
+            logger.debug("③ get_futures_daily(按交易所, 逐日回填)")
             
             # 品种到交易所的映射
             VARIETY_TO_EXCHANGE = {
                 'CU': 'SHFE', 'AL': 'SHFE', 'ZN': 'SHFE', 'PB': 'SHFE', 'NI': 'SHFE', 
-                'SN': 'SHFE', 'AU': 'SHFE', 'AG': 'SHFE', 'RB': 'SHFE', 'WR': 'SHFE', 
+                # 注：已剔除退市/无成交品种 WR(线材)、RR(粳米)、ZC(动力煤)、
+                #     JR/LR/WH/PM/RI(稻麦系列)、PL/AD/OP(非真实品种)
+                'SN': 'SHFE', 'AU': 'SHFE', 'AG': 'SHFE', 'RB': 'SHFE',
                 'HC': 'SHFE', 'FU': 'SHFE', 'BU': 'SHFE', 'RU': 'SHFE', 'AO': 'SHFE',
                 'A': 'DCE', 'B': 'DCE', 'C': 'DCE', 'CS': 'DCE', 'M': 'DCE', 'Y': 'DCE', 
                 'P': 'DCE', 'L': 'DCE', 'V': 'DCE', 'PP': 'DCE', 'J': 'DCE', 'JM': 'DCE', 
-                'I': 'DCE', 'JD': 'DCE', 'LH': 'DCE', 'EB': 'DCE', 'EG': 'DCE', 'PG': 'DCE', 'RR': 'DCE',
+                'I': 'DCE', 'JD': 'DCE', 'LH': 'DCE', 'EB': 'DCE', 'EG': 'DCE', 'PG': 'DCE',
                 'SR': 'CZCE', 'CF': 'CZCE', 'TA': 'CZCE', 'MA': 'CZCE', 'FG': 'CZCE', 
-                'RM': 'CZCE', 'OI': 'CZCE', 'CY': 'CZCE', 'AP': 'CZCE', 'CJ': 'CZCE', 
+                'RM': 'CZCE', 'OI': 'CZCE', 'AP': 'CZCE', 'CJ': 'CZCE', 
                 'UR': 'CZCE', 'SA': 'CZCE', 'PF': 'CZCE', 'PK': 'CZCE', 'SF': 'CZCE', 
-                'SM': 'CZCE', 'ZC': 'CZCE', 'RS': 'CZCE', 'PX': 'CZCE', 'PR': 'CZCE', 
-                'SH': 'CZCE', 'PL': 'CZCE', 'JR': 'CZCE', 'LR': 'CZCE', 'WH': 'CZCE', 
-                'PM': 'CZCE', 'RI': 'CZCE', 'LG': 'CZCE',
+                'SM': 'CZCE', 'PX': 'CZCE', 'PR': 'CZCE', 'SH': 'CZCE',
                 'SC': 'INE', 'LU': 'INE', 'NR': 'INE', 'BC': 'INE', 'EC': 'INE',
-                'LC': 'GFEX', 'SI': 'GFEX', 'PS': 'GFEX', 'AD': 'GFEX', 'OP': 'GFEX',
+                'LC': 'GFEX', 'SI': 'GFEX', 'PS': 'GFEX',
                 'SP': 'SHFE', 'SS': 'SHFE', 'BR': 'SHFE'
             }
             
@@ -244,27 +277,32 @@ class TechnicalDataUpdater(ProgressReporter):
                     if 'variety' in df.columns:
                         df_variety = df[df['variety'] == symbol].copy()
                         if not df_variety.empty:
-                            print(f"    ✅ get_futures_daily成功: {len(df_variety)} 条记录")
+                            logger.debug(f"get_futures_daily成功: {len(df_variety)} 条记录")
                             processed_df = self._process_get_futures_daily_data(df_variety, symbol, start_date)
                             if not processed_df.empty:
                                 return processed_df
                             # 数据找到但无新记录 → 返回空DataFrame表示"数据已最新"
-                            print(f"    ℹ️ get_futures_daily: 数据已是最新，无新记录")
+                            logger.debug("get_futures_daily: 数据已是最新，无新记录")
                             return pd.DataFrame()
-                print(f"    ⚠️ get_futures_daily: 无该品种数据")
+                logger.warning("get_futures_daily: 无该品种数据")
             else:
-                print(f"    ⚠️ 未找到品种对应的交易所")
+                logger.warning("未找到品种对应的交易所")
                 
         except Exception as e:
-            print(f"    ⚠️ get_futures_daily失败: {str(e)[:50]}")
+            # 交易所官网日报接口同样受反爬影响（如大商所瑞数 412），
+            # 且它是最后兜底源，通常前两源已成功，故记为 WARNING。
+            detail = str(e)[:80]
+            hint = "（官网疑似反爬拦截）" if any(
+                k in detail for k in ("Expecting value", "412", "JSONDecode", "BadZipFile")) else ""
+            logger.warning(f"③ get_futures_daily({exchange or symbol})失败{hint}: {detail}")
         
-        print(f"    ❌ 所有接口都失败")
+        logger.error(f"{symbol}: 所有行情源均获取失败（新浪主连/东财主连/交易所官网）")
         return None
     
     def _process_em_data(self, df: pd.DataFrame, symbol: str, start_date: Optional[datetime] = None) -> pd.DataFrame:
         """处理东方财富数据"""
         try:
-            print(f"    🔧 处理东方财富数据...")
+            logger.debug("处理东方财富数据...")
             
             # 标准化列名 - 东方财富返回的列名
             column_mapping = {
@@ -276,18 +314,18 @@ class TechnicalDataUpdater(ProgressReporter):
             
             # 确保数据是DataFrame格式
             if not isinstance(df, pd.DataFrame):
-                print(f"    ❌ 数据不是DataFrame格式: {type(df)}")
+                logger.error(f"数据不是DataFrame格式: {type(df)}")
                 return pd.DataFrame()
             
             # 处理日期格式
             if '时间' not in df.columns:
-                print(f"    ❌ 未找到时间列，可用列: {list(df.columns)}")
+                logger.error(f"未找到时间列，可用列: {list(df.columns)}")
                 return pd.DataFrame()
             
             try:
                 df['时间'] = pd.to_datetime(df['时间'])
             except Exception as time_error:
-                print(f"    ❌ 时间格式转换失败: {time_error}")
+                logger.error(f"时间格式转换失败: {time_error}")
                 return pd.DataFrame()
             
             # 如果指定了开始日期，过滤数据
@@ -295,26 +333,26 @@ class TechnicalDataUpdater(ProgressReporter):
                 df = df[df['时间'] > start_date]
             
             if df.empty:
-                print(f"    ℹ️ 无新数据需要更新")
+                logger.debug("无新数据需要更新")
                 return pd.DataFrame()
             
             # 排序并重置索引
             df = df.sort_values('时间').reset_index(drop=True)
             
-            print(f"    ✅ 东方财富数据处理完成: {len(df)} 条记录")
+            logger.debug(f"东方财富数据处理完成: {len(df)} 条记录")
             if len(df) > 0:
-                print(f"    📅 日期范围: {df['时间'].min().strftime('%Y-%m-%d')} ~ {df['时间'].max().strftime('%Y-%m-%d')}")
+                logger.debug(f"日期范围: {df['时间'].min().strftime('%Y-%m-%d')} ~ {df['时间'].max().strftime('%Y-%m-%d')}")
             
             return df
             
         except Exception as e:
-            print(f"    ❌ 东方财富数据处理失败: {e}")
+            logger.error(f"东方财富数据处理失败: {e}")
             return pd.DataFrame()
     
     def _process_sina_daily_data(self, df: pd.DataFrame, symbol: str, start_date: Optional[datetime] = None) -> pd.DataFrame:
         """处理新浪日线数据"""
         try:
-            print(f"    🔧 处理新浪日线数据...")
+            logger.debug("处理新浪日线数据...")
             
             # 处理日期（通常在索引中）
             if hasattr(df.index, 'to_series'):
@@ -338,13 +376,13 @@ class TechnicalDataUpdater(ProgressReporter):
                 if time_cols:
                     df = df.rename(columns={time_cols[0]: '时间'})
                 else:
-                    print(f"    ❌ 未找到时间列")
+                    logger.error("未找到时间列")
                     return pd.DataFrame()
             
             try:
                 df['时间'] = pd.to_datetime(df['时间'])
             except Exception as time_error:
-                print(f"    ❌ 时间格式转换失败: {time_error}")
+                logger.error(f"时间格式转换失败: {time_error}")
                 return pd.DataFrame()
             
             # 如果指定了开始日期，过滤数据
@@ -352,23 +390,23 @@ class TechnicalDataUpdater(ProgressReporter):
                 df = df[df['时间'] > start_date]
             
             if df.empty:
-                print(f"    ℹ️ 无新数据需要更新")
+                logger.debug("无新数据需要更新")
                 return pd.DataFrame()
             
             # 排序并重置索引
             df = df.sort_values('时间').reset_index(drop=True)
             
-            print(f"    ✅ 新浪日线数据处理完成: {len(df)} 条记录")
+            logger.debug(f"新浪日线数据处理完成: {len(df)} 条记录")
             return df
             
         except Exception as e:
-            print(f"    ❌ 新浪日线数据处理失败: {e}")
+            logger.error(f"新浪日线数据处理失败: {e}")
             return pd.DataFrame()
     
     def _process_sina_main_data(self, df: pd.DataFrame, symbol: str, start_date: Optional[datetime] = None) -> pd.DataFrame:
         """处理新浪主力合约数据"""
         try:
-            print(f"    🔧 处理新浪主力数据...")
+            logger.debug("处理新浪主力数据...")
             
             # 标准化列名
             column_mapping = {
@@ -392,7 +430,7 @@ class TechnicalDataUpdater(ProgressReporter):
                     df = df.reset_index()
                     df['时间'] = pd.to_datetime(df.index, errors='coerce')
                 else:
-                    print(f"    ❌ 无法找到时间列")
+                    logger.error("无法找到时间列")
                     return pd.DataFrame()
             
             df['时间'] = pd.to_datetime(df['时间'], errors='coerce')
@@ -402,22 +440,22 @@ class TechnicalDataUpdater(ProgressReporter):
                 df = df[df['时间'] > start_date]
             
             if df.empty:
-                print(f"    ℹ️ 无新数据需要更新")
+                logger.debug("无新数据需要更新")
                 return pd.DataFrame()
             
             df = df.sort_values('时间').reset_index(drop=True)
             
-            print(f"    ✅ 新浪主力数据处理完成: {len(df)} 条记录")
+            logger.debug(f"新浪主力数据处理完成: {len(df)} 条记录")
             return df
             
         except Exception as e:
-            print(f"    ❌ 新浪主力数据处理失败: {e}")
+            logger.error(f"新浪主力数据处理失败: {e}")
             return pd.DataFrame()
     
     def _process_get_futures_daily_data(self, df: pd.DataFrame, symbol: str, start_date: Optional[datetime] = None) -> pd.DataFrame:
         """处理get_futures_daily返回的数据"""
         try:
-            print(f"    🔧 处理get_futures_daily数据...")
+            logger.debug("处理get_futures_daily数据...")
             
             # get_futures_daily返回的是多个合约的数据，需要聚合成主力合约
             # 按日期分组，选择成交量最大的合约作为当日主力
@@ -428,7 +466,7 @@ class TechnicalDataUpdater(ProgressReporter):
                 else:
                     df['时间'] = pd.to_datetime(df['date'], errors='coerce')
             elif '时间' not in df.columns:
-                print(f"    ❌ 未找到日期列")
+                logger.error("未找到日期列")
                 return pd.DataFrame()
             
             # 确保数值列是数值类型
@@ -448,7 +486,7 @@ class TechnicalDataUpdater(ProgressReporter):
                 result_data.append(main_contract)
             
             if not result_data:
-                print(f"    ℹ️ 无有效数据")
+                logger.warning("无有效数据")
                 return pd.DataFrame()
             
             df = pd.DataFrame(result_data)
@@ -472,7 +510,7 @@ class TechnicalDataUpdater(ProgressReporter):
                 df = df[df['时间'] > start_date]
             
             if df.empty:
-                print(f"    ℹ️ 无新数据需要更新")
+                logger.debug("无新数据需要更新")
                 return pd.DataFrame()
             
             # 排序并重置索引
@@ -487,20 +525,20 @@ class TechnicalDataUpdater(ProgressReporter):
                 standard_cols.append('持仓量')
             df = df[[c for c in standard_cols if c in df.columns]].copy()
             
-            print(f"    ✅ get_futures_daily数据处理完成: {len(df)} 条记录")
+            logger.debug(f"get_futures_daily数据处理完成: {len(df)} 条记录")
             if len(df) > 0:
-                print(f"    📅 日期范围: {df['时间'].min().strftime('%Y-%m-%d')} ~ {df['时间'].max().strftime('%Y-%m-%d')}")
+                logger.debug(f"日期范围: {df['时间'].min().strftime('%Y-%m-%d')} ~ {df['时间'].max().strftime('%Y-%m-%d')}")
             
             return df
             
         except Exception as e:
-            print(f"    ❌ get_futures_daily数据处理失败: {e}")
+            logger.error(f"get_futures_daily数据处理失败: {e}")
             return pd.DataFrame()
     
     def _process_general_data(self, df: pd.DataFrame, symbol: str, start_date: Optional[datetime] = None) -> pd.DataFrame:
         """处理通用期货数据"""
         try:
-            print(f"    🔧 处理通用期货数据...")
+            logger.debug("处理通用期货数据...")
             
             # 标准化列名
             column_mapping = {
@@ -514,7 +552,7 @@ class TechnicalDataUpdater(ProgressReporter):
                     df = df.rename(columns={old_col: new_col})
             
             if '时间' not in df.columns:
-                print(f"    ❌ 无法找到时间列")
+                logger.error("无法找到时间列")
                 return pd.DataFrame()
             
             df['时间'] = pd.to_datetime(df['时间'], errors='coerce')
@@ -524,16 +562,16 @@ class TechnicalDataUpdater(ProgressReporter):
                 df = df[df['时间'] > start_date]
             
             if df.empty:
-                print(f"    ℹ️ 无新数据需要更新")
+                logger.debug("无新数据需要更新")
                 return pd.DataFrame()
             
             df = df.sort_values('时间').reset_index(drop=True)
             
-            print(f"    ✅ 通用数据处理完成: {len(df)} 条记录")
+            logger.debug(f"通用数据处理完成: {len(df)} 条记录")
             return df
             
         except Exception as e:
-            print(f"    ❌ 通用数据处理失败: {e}")
+            logger.error(f"通用数据处理失败: {e}")
             return pd.DataFrame()
     
     def calculate_technical_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -547,7 +585,7 @@ class TechnicalDataUpdater(ProgressReporter):
             带技术指标的数据
         """
         try:
-            print("      🔧 开始安全指标计算...")
+            logger.debug("开始安全指标计算...")
             
             # 确保数据按时间排序
             df = df.sort_values('时间').reset_index(drop=True)
@@ -570,7 +608,7 @@ class TechnicalDataUpdater(ProgressReporter):
             high = np.maximum(high, np.maximum(open_, close))
             low = np.minimum(low, np.minimum(open_, close))
             
-            print("        ✅ 数据预处理完成")
+            logger.debug("数据预处理完成")
             
             # ========== 基础指标 ==========
             
@@ -610,7 +648,7 @@ class TechnicalDataUpdater(ProgressReporter):
             df["BOLL_MID"] = ma20
             df["BOLL_WIDTH"] = df["BOLL_UP"] - df["BOLL_LOW"]
             
-            print("        ✅ 基础指标完成")
+            logger.debug("基础指标完成")
             
             # ========== 高级指标 ==========
             
@@ -644,7 +682,7 @@ class TechnicalDataUpdater(ProgressReporter):
             ).replace(0, 1e-10)
             df["STOCH_RSI"] = stoch_rsi
             
-            print("        ✅ 高级指标完成")
+            logger.debug("高级指标完成")
             
             # ========== 成交量指标 ==========
             
@@ -653,7 +691,7 @@ class TechnicalDataUpdater(ProgressReporter):
             sign = pd.Series(np.where(price_change > 0, 1, np.where(price_change < 0, -1, 0)), index=close.index)
             df["OBV"] = (sign * volume).cumsum()
             
-            print("        ✅ 成交量指标完成")
+            logger.debug("成交量指标完成")
             
             # ========== 持仓量指标 ==========
             
@@ -664,18 +702,18 @@ class TechnicalDataUpdater(ProgressReporter):
                 df["OI_CHANGE"] = oi.diff().fillna(0)
                 df["OI_CHANGE_PCT"] = oi.pct_change().fillna(0) * 100
                 
-                print("        ✅ 持仓量指标完成")
+                logger.debug("持仓量指标完成")
             
             # 统计指标数量
             original_cols = ['时间', '开盘', '最高', '最低', '收盘', '成交量', '持仓量']
             indicator_cols = [col for col in df.columns if col not in original_cols]
             
-            print(f"      ✅ 安全指标计算完成: {len(indicator_cols)} 个指标")
+            logger.debug(f"安全指标计算完成: {len(indicator_cols)} 个指标")
             
             return df
             
         except Exception as e:
-            print(f"      ❌ 技术指标计算失败: {str(e)}")
+            logger.error(f"技术指标计算失败: {str(e)}")
             import traceback
             traceback.print_exc()
             return df
@@ -727,11 +765,11 @@ class TechnicalDataUpdater(ProgressReporter):
                 
                 new_records = len(combined_df) - len(existing_df)
                 if new_records > 0:
-                    print(f"    ✅ {symbol}: 新增 {new_records} 条记录")
+                    logger.debug(f"{symbol}: 新增 {new_records} 条记录")
                     self.update_stats["updated_varieties"].append(symbol)
                     self.update_stats["total_new_records"] += new_records
                 else:
-                    print(f"    ℹ️ {symbol}: 无新数据")
+                    logger.debug(f"{symbol}: 无新数据")
                     self.update_stats["skipped_varieties"].append(symbol)
                     # 若历史文件含冗余列（symbol/date 等在首列），即使无新增也触发一次重写清理
                     raw_existing = pd.read_csv(ohlc_file, encoding='utf-8', nrows=1)
@@ -739,12 +777,12 @@ class TechnicalDataUpdater(ProgressReporter):
                     has_extra_cols = any(c not in standard_cols for c in raw_existing.columns)
                     if not has_extra_cols:
                         return True
-                    print(f"    ♻️ {symbol}: 检测到历史冗余列，统一列序后重写")
+                    logger.debug(f"{symbol}: 检测到历史冗余列，统一列序后重写")
             else:
                 # 新品种或无现有数据
                 new_data = self._standard_ohlc_columns(new_data)
                 combined_df = new_data
-                print(f"    ✅ {symbol}: 创建 {len(new_data)} 条记录")
+                logger.debug(f"{symbol}: 创建 {len(new_data)} 条记录")
                 self.update_stats["new_varieties"].append(symbol)
                 self.update_stats["total_new_records"] += len(new_data)
             
@@ -756,11 +794,11 @@ class TechnicalDataUpdater(ProgressReporter):
                 sync = MainContractSync(data_root=self.base_dir.parent)
                 combined_df, rollover_cnt = sync.apply_rollover_adjustment(symbol, combined_df)
                 if rollover_cnt:
-                    print(f"    [+] {symbol}: 识别 {rollover_cnt} 个主力换月点，已后复权消除跳空")
+                    logger.debug(f"{symbol}: 识别 {rollover_cnt} 个主力换月点，已后复权消除跳空")
                 elif combined_df is not None and not combined_df.empty:
-                    print(f"    [i] {symbol}: 本次无已确认的换月点（主力库积累后会自动修正）")
+                    logger.debug(f"{symbol}: 本次无已确认的换月点（主力库积累后会自动修正）")
             except Exception as e:
-                print(f"    [!] {symbol}: 主力换月复权失败（不影响保存）- {str(e)[:80]}")
+                logger.warning(f"{symbol}: 主力换月复权失败（不影响保存）- {str(e)[:80]}")
 
             # 重新计算技术指标（基于完整数据）
             combined_df = self.calculate_technical_indicators(combined_df)
@@ -808,7 +846,7 @@ class TechnicalDataUpdater(ProgressReporter):
             return True
             
         except Exception as e:
-            print(f"    ❌ {symbol}: 保存失败 - {str(e)}")
+            logger.error(f"{symbol}: 保存失败 - {str(e)}")
             self.update_stats["failed_varieties"].append(symbol)
             self.update_stats["error_messages"].append(f"{symbol}: 保存失败 - {str(e)}")
             return False
@@ -824,8 +862,7 @@ class TechnicalDataUpdater(ProgressReporter):
         Returns:
             更新结果统计
         """
-        print(f"🚀 技术分析数据更新器")
-        print("=" * 60)
+        logger.info("技术分析数据更新器")
         
         # 解析目标日期
         try:
@@ -839,27 +876,32 @@ class TechnicalDataUpdater(ProgressReporter):
         self.update_stats["start_time"] = datetime.now()
         self.update_stats["target_date"] = target_date_str
         
-        print(f"📅 目标更新日期: {target_date.strftime('%Y-%m-%d')}")
+        logger.info(f"目标更新日期: {target_date.strftime('%Y-%m-%d')}")
         
         # 获取现有数据状态
         existing_varieties, variety_info = self.get_existing_data_status()
         
-        # 确定要更新的品种
+        # 确定要更新的品种（清单动态取自每日同步维护的主力合约库）
+        known_varieties = self._dynamic_varieties(target_date)
         if specific_varieties:
-            target_symbols = [s for s in specific_varieties if s.upper() in SYMBOL_MAPPING]
-            print(f"🎯 指定更新品种: {len(target_symbols)} 个")
+            wanted = [str(s).strip().upper() for s in specific_varieties if str(s).strip()]
+            target_symbols = list(dict.fromkeys(wanted))
+            unknown = [s for s in target_symbols if s not in known_varieties]
+            if unknown:
+                # 新品种/冷门品种不在清单内也照常尝试，取不到数据会计入失败，而非静默丢弃
+                logger.warning(f"{', '.join(unknown)} 不在已知品种清单内，仍尝试更新")
+            logger.info(f"指定更新品种: {len(target_symbols)} 个")
         else:
-            target_symbols = list(SYMBOL_MAPPING.keys())
-            print(f"🎯 全品种更新: {len(target_symbols)} 个")
+            target_symbols = known_varieties
+            logger.info(f"全品种更新: {len(target_symbols)} 个")
         
         # 执行更新
         processed_count = 0
         
         for i, symbol in enumerate(target_symbols):
             self._report_progress("处理品种(交易所K线)", i + 1, len(target_symbols), symbol)
-            print(f"\n[{i+1}/{len(target_symbols)}] 处理品种: {symbol}")
+            logger.info(f"[{i+1}/{len(target_symbols)}] 处理品种: {symbol}")
             
-            contract_name = SYMBOL_MAPPING[symbol]
             existing_info = variety_info.get(symbol)
             
             # 确定起始日期（用于增量更新）
@@ -869,25 +911,26 @@ class TechnicalDataUpdater(ProgressReporter):
                 days_gap = (target_date.date() - latest_date.date()).days
                 
                 if days_gap <= 1:
-                    print(f"    ℹ️ 数据已是最新 (最新: {latest_date.strftime('%Y-%m-%d')}, 缺口: {days_gap}天)")
+                    logger.debug(f"数据已是最新 (最新: {latest_date.strftime('%Y-%m-%d')}, 缺口: {days_gap}天)")
                     self.update_stats["skipped_varieties"].append(symbol)
                     continue
                 
-                print(f"    📅 最新数据: {latest_date.strftime('%Y-%m-%d')}, 缺口: {days_gap}天")
+                logger.debug(f"最新数据: {latest_date.strftime('%Y-%m-%d')}, 缺口: {days_gap}天")
                 start_date = latest_date
             else:
-                print(f"    🆕 新品种，将创建完整数据")
+                logger.debug("新品种，将创建完整数据")
             
             # 获取数据
-            new_data = self.fetch_ohlc_data(symbol, contract_name, start_date)
+            new_data = self.fetch_ohlc_data(symbol, start_date)
             
             if new_data is None:
-                print(f"    ❌ {symbol}: 数据获取失败")
+                # 具体失败原因已在 fetch_ohlc_data 内记录，此处只做归集，避免重复告警
+                logger.warning(f"{symbol}: 本次未取到行情数据，已计入失败")
                 self.update_stats["failed_varieties"].append(symbol)
                 continue
             
             if new_data.empty:
-                print(f"    ℹ️ {symbol}: 无新数据")
+                logger.debug(f"{symbol}: 无新数据")
                 self.update_stats["skipped_varieties"].append(symbol)
                 continue
             
@@ -903,17 +946,8 @@ class TechnicalDataUpdater(ProgressReporter):
         # 完成统计
         self.update_stats["end_time"] = datetime.now()
         
-        print(f"\n📊 更新完成统计:")
-        print(f"  ✅ 成功更新品种: {len(self.update_stats['updated_varieties'])} 个")
-        print(f"  🆕 新增品种: {len(self.update_stats['new_varieties'])} 个")
-        print(f"  ❌ 失败品种: {len(self.update_stats['failed_varieties'])} 个")
-        print(f"  ⏭️ 跳过品种: {len(self.update_stats['skipped_varieties'])} 个")
-        print(f"  📈 新增记录总数: {self.update_stats['total_new_records']} 条")
-        print(f"  ⏱️ 耗时: {(self.update_stats['end_time'] - self.update_stats['start_time']).total_seconds():.1f} 秒")
-        
-        if self.update_stats["failed_varieties"]:
-            print(f"  ⚠️ 失败品种列表: {', '.join(self.update_stats['failed_varieties'])}")
-        
+        self.log_update_summary()
+
         return self.update_stats
     
     def update_data(self, target_date_str: str, specific_varieties: Optional[List[str]] = None) -> Dict:
@@ -931,19 +965,17 @@ class TechnicalDataUpdater(ProgressReporter):
 
 def main():
     """交互式主函数"""
-    print("=" * 80)
-    print("📊 技术分析数据更新器")
-    print("=" * 80)
+    logger.info("技术分析数据更新器")
     
     updater = TechnicalDataUpdater()
     
     # 获取现有数据状态
-    print("\n🔍 正在检查现有数据状态...")
+    logger.info("正在检查现有数据状态...")
     varieties, info = updater.get_existing_data_status()
     
-    print(f"\n📦 已有品种数量: {len(varieties)} 个")
+    logger.info(f"已有品种数量: {len(varieties)} 个")
     if varieties:
-        print(f"   品种列表: {', '.join(sorted(varieties)[:20])}{'...' if len(varieties) > 20 else ''}")
+        logger.info(f"品种列表: {', '.join(sorted(varieties)[:20])}{'...' if len(varieties) > 20 else ''}")
         
         # 显示最新日期
         if info:
@@ -953,14 +985,12 @@ def main():
                     latest_dates[v] = v_info['latest_date']
             if latest_dates:
                 overall_latest = max(latest_dates.values())
-                print(f"📅 当前最新数据日期: {overall_latest.strftime('%Y-%m-%d')}")
+                logger.info(f"当前最新数据日期: {overall_latest.strftime('%Y-%m-%d')}")
     else:
-        print("📅 当前暂无数据")
+        logger.warning("当前暂无数据")
     
     # 用户输入更新参数
-    print("\n" + "=" * 80)
-    print("请输入更新参数:")
-    print("-" * 80)
+    logger.info("请输入更新参数:")
     
     # 输入目标日期
     default_date = datetime.now().strftime('%Y-%m-%d')
@@ -971,7 +1001,7 @@ def main():
     try:
         datetime.strptime(target_date, '%Y-%m-%d')
     except ValueError:
-        print(f"❌ 日期格式错误，使用默认日期: {default_date}")
+        logger.error(f"日期格式错误，使用默认日期: {default_date}")
         target_date = default_date
     
     # 输入品种
@@ -979,31 +1009,27 @@ def main():
     
     if varieties_input:
         specific_varieties = [v.strip().upper() for v in varieties_input.split(',')]
-        print(f"\n✅ 将更新指定品种: {', '.join(specific_varieties)}")
+        logger.info(f"将更新指定品种: {', '.join(specific_varieties)}")
     else:
         specific_varieties = None
-        print(f"\n✅ 将更新所有品种")
+        logger.info("将更新所有品种")
     
     # 确认
-    print("\n" + "=" * 80)
-    print(f"📋 更新配置:")
-    print(f"   目标日期: {target_date}")
-    print(f"   更新品种: {'全部' if not specific_varieties else ', '.join(specific_varieties)}")
-    print(f"   更新模式: 智能增量更新（自动从最新数据补全到目标日期）")
-    print("=" * 80)
+    logger.info("更新配置:")
+    logger.info(f"目标日期: {target_date}")
+    logger.info(f"更新品种: {'全部' if not specific_varieties else ', '.join(specific_varieties)}")
+    logger.info("更新模式: 智能增量更新（自动从最新数据补全到目标日期）")
     
     confirm = input("\n确认开始更新？(y/N): ").strip().lower()
     if confirm != 'y':
-        print("❌ 已取消更新")
+        logger.error("已取消更新")
         return
     
     # 执行更新
-    print("\n🚀 开始更新...")
+    logger.info("开始更新...")
     result = updater.update_to_date(target_date, specific_varieties)
     
-    print(f"\n" + "=" * 80)
-    print("🎯 更新完成!")
-    print("=" * 80)
+    logger.info("更新完成!")
 
 if __name__ == "__main__":
     main()

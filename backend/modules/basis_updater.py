@@ -13,6 +13,8 @@ import time
 import random
 import json
 from typing import Dict, List, Optional, Tuple
+from loguru import logger
+
 from modules.progress import ProgressReporter
 
 class BasisDataUpdater(ProgressReporter):
@@ -59,7 +61,7 @@ class BasisDataUpdater(ProgressReporter):
             varieties: 现有品种列表
             variety_info: 各品种详细信息
         """
-        print("🔍 检查现有基差数据状态...")
+        logger.info("检查现有基差数据状态...")
         
         latest_date = None
         varieties = []
@@ -69,7 +71,7 @@ class BasisDataUpdater(ProgressReporter):
             return None, [], {}
         
         variety_folders = [d for d in self.base_dir.iterdir() if d.is_dir()]
-        print(f"📂 发现 {len(variety_folders)} 个品种文件夹")
+        logger.info(f"发现 {len(variety_folders)} 个品种文件夹")
         
         for folder in variety_folders:
             variety = folder.name
@@ -95,16 +97,16 @@ class BasisDataUpdater(ProgressReporter):
                         if latest_date is None or variety_latest > latest_date:
                             latest_date = variety_latest
                         
-                        print(f"  {variety}: {record_count} 条记录 ({variety_earliest.strftime('%Y-%m-%d')} ~ {variety_latest.strftime('%Y-%m-%d')})")
+                        logger.info(f"{variety}: {record_count} 条记录 ({variety_earliest.strftime('%Y-%m-%d')} ~ {variety_latest.strftime('%Y-%m-%d')})")
                         
                 except Exception as e:
-                    print(f"  ❌ {variety}: 读取失败 - {str(e)[:50]}")
+                    logger.warning(f"{variety}: 读取失败 - {str(e)[:50]}")
                     self.update_stats["error_messages"].append(f"{variety}: 数据读取失败 - {str(e)}")
         
         if latest_date:
-            print(f"\n📅 整体最新数据日期: {latest_date.strftime('%Y-%m-%d')}")
+            logger.info(f"整体最新数据日期: {latest_date.strftime('%Y-%m-%d')}")
         else:
-            print("\n⚠️ 未找到有效的基差数据")
+            logger.warning("未找到有效的基差数据")
         
         return latest_date, varieties, variety_info
     
@@ -123,7 +125,7 @@ class BasisDataUpdater(ProgressReporter):
         
         if latest_date is None:
             # 没有现有数据，获取最近5个交易日
-            print("⚠️ 未找到现有数据，将获取最近5个交易日数据")
+            logger.warning("未找到现有数据，将获取最近5个交易日数据")
             current = target_date
             while len(update_dates) < 5:
                 current -= timedelta(days=1)
@@ -153,7 +155,7 @@ class BasisDataUpdater(ProgressReporter):
         Returns:
             数据DataFrame或None
         """
-        print(f"  📡 获取 {date_str} 的基差数据...")
+        logger.info(f"获取 {date_str} 的基差数据...")
         
         for attempt in range(retry_count):
             try:
@@ -161,12 +163,12 @@ class BasisDataUpdater(ProgressReporter):
                 df = ak.futures_spot_price(date_str)
                 
                 if df is None or df.empty:
-                    print(f"    ❌ 第{attempt+1}次尝试: 无数据返回")
+                    logger.warning(f"{date_str}: 第{attempt+1}次尝试无数据返回")
                     if attempt < retry_count - 1:
                         time.sleep(random.uniform(1, 3))
                     continue
                 
-                print(f"    ✅ 获取到 {len(df)} 个品种的数据")
+                logger.debug(f"{date_str}: 获取到 {len(df)} 个品种的数据")
                 
                 # 检查品种列名（适应不同版本的akshare）
                 variety_col = None
@@ -175,7 +177,8 @@ class BasisDataUpdater(ProgressReporter):
                 elif 'symbol' in df.columns:
                     variety_col = 'symbol'
                 else:
-                    print(f"    ❌ 未找到品种列（var或symbol）")
+                    # akshare 版本差异导致的列名回退，属可容忍异常
+                    logger.warning(f"{date_str}: 返回数据中未找到品种列（var 或 symbol），可用列: {list(df.columns)[:8]}")
                     continue
                 
                 # 数据标准化
@@ -185,11 +188,11 @@ class BasisDataUpdater(ProgressReporter):
                 return df, variety_col
                 
             except Exception as e:
-                print(f"    ❌ 第{attempt+1}次尝试失败: {str(e)[:100]}")
+                logger.warning(f"{date_str}: 第{attempt+1}次尝试失败 - {str(e)[:100]}")
                 if attempt < retry_count - 1:
                     time.sleep(random.uniform(1, 3))
         
-        print(f"    ❌ 所有尝试失败")
+        logger.error(f"{date_str}: 所有尝试均失败")
         return None, None
     
     def _sync_dominant_contract(self, symbol: str, df: pd.DataFrame):
@@ -227,9 +230,9 @@ class BasisDataUpdater(ProgressReporter):
             sync = MainContractSync(data_root=self.base_dir.parent)
             saved = sync._save(symbol, rows)
             if saved:
-                print(f"    📚 {symbol}: 主力合约已同步到本地库（{saved} 条）")
+                logger.debug(f"{symbol}: 主力合约已同步到本地库（{saved} 条）")
         except Exception as e:
-            print(f"    ⚠️ {symbol}: 同步主力合约失败 - {str(e)[:80]}")
+            logger.warning(f"{symbol}: 同步主力合约失败（不影响基差保存）- {str(e)[:80]}")
 
     def save_variety_data(self, variety: str, new_data: pd.DataFrame) -> bool:
         """
@@ -261,15 +264,15 @@ class BasisDataUpdater(ProgressReporter):
                 # 注：该字段命名为 new_records，实为“合并后相对旧文件的净增行数”
                 new_records = len(combined_df) - len(existing_df)
                 if new_records > 0:
-                    print(f"    ✅ {variety}: 新增 {new_records} 条记录")
+                    logger.debug(f"{variety}: 新增 {new_records} 条记录")
                     self.update_stats["total_new_records"] += new_records
                 else:
-                    print(f"    ℹ️ {variety}: 无新数据")
+                    logger.debug(f"{variety}: 无新数据")
                     self._count_variety_once("skipped_varieties", variety)
                     return True
             else:
                 combined_df = new_data
-                print(f"    ✅ {variety}: 创建 {len(new_data)} 条记录")
+                logger.debug(f"{variety}: 创建 {len(new_data)} 条记录")
                 self.update_stats["total_new_records"] += len(new_data)
             
             # 保存CSV数据
@@ -297,7 +300,7 @@ class BasisDataUpdater(ProgressReporter):
             return True
             
         except Exception as e:
-            print(f"    ❌ {variety}: 保存失败 - {str(e)}")
+            logger.error(f"{variety}: 保存失败 - {str(e)}")
             self._count_variety_once("failed_varieties", variety)
             self.update_stats["error_messages"].append(f"{variety}: 保存失败 - {str(e)}")
             return False
@@ -314,8 +317,7 @@ class BasisDataUpdater(ProgressReporter):
         Returns:
             更新结果统计
         """
-        print(f"🚀 基差数据更新器")
-        print("=" * 60)
+        logger.info("基差数据更新器")
         
         # 解析目标日期
         try:
@@ -331,19 +333,19 @@ class BasisDataUpdater(ProgressReporter):
         if start_date_str:
             try:
                 start_date = datetime.strptime(start_date_str, '%Y-%m-%d')
-                print(f"📅 指定开始日期: {start_date.strftime('%Y-%m-%d')}")
+                logger.info(f"指定开始日期: {start_date.strftime('%Y-%m-%d')}")
             except ValueError:
                 try:
                     start_date = datetime.strptime(start_date_str, '%Y%m%d')
-                    print(f"📅 指定开始日期: {start_date.strftime('%Y-%m-%d')}")
+                    logger.info(f"指定开始日期: {start_date.strftime('%Y-%m-%d')}")
                 except ValueError:
-                    print(f"⚠️ 开始日期格式错误，将使用现有数据的最新日期")
+                    logger.warning(f"开始日期格式错误（{start_date_str}），将使用现有数据的最新日期")
                     start_date = None
         
         self.update_stats["start_time"] = datetime.now()
         self.update_stats["target_date"] = target_date_str
         
-        print(f"📅 目标更新日期: {target_date.strftime('%Y-%m-%d')}")
+        logger.info(f"目标更新日期: {target_date.strftime('%Y-%m-%d')}")
         
         # 获取现有数据状态
         latest_date, existing_varieties, variety_info = self.get_existing_data_status()
@@ -360,7 +362,7 @@ class BasisDataUpdater(ProgressReporter):
         update_dates = self.calculate_update_dates(actual_start_date, target_date)
         
         if not update_dates:
-            print("✅ 数据已是最新，无需更新")
+            logger.info("数据已是最新，无需更新")
             self.update_stats["end_time"] = datetime.now()
             return self.update_stats
         
@@ -368,11 +370,11 @@ class BasisDataUpdater(ProgressReporter):
         wanted: Optional[set] = None
         if specific_varieties:
             wanted = {str(v).strip().upper() for v in specific_varieties if str(v).strip()}
-            print(f"🎯 指定更新品种: {len(wanted)} 个 -> {', '.join(sorted(wanted))}")
+            logger.info(f"指定更新品种: {len(wanted)} 个 -> {', '.join(sorted(wanted))}")
         else:
-            print("🎯 全品种更新")
+            logger.info("全品种更新")
 
-        print(f"📋 需要更新的日期: {len(update_dates)} 个交易日")
+        logger.info(f"需要更新的日期: {len(update_dates)} 个交易日")
         
         # 执行更新
         success_count = 0
@@ -380,13 +382,14 @@ class BasisDataUpdater(ProgressReporter):
         
         for i, date_str in enumerate(update_dates):
             self._report_progress("拉取期现基差(按交易日)", i + 1, len(update_dates), date_str)
-            print(f"\n[{i+1}/{len(update_dates)}] 处理日期: {date_str}")
+            logger.info(f"[{i+1}/{len(update_dates)}] 处理日期: {date_str}")
             total_attempts += 1
             
             # 获取当日数据
             result = self.fetch_daily_data(date_str)
             if result is None or result[0] is None:
-                print(f"  ❌ 跳过 {date_str}: 数据获取失败")
+                # 原因已在 fetch_daily_data 内记录，此处只提示跳过，避免重复告警
+                logger.warning(f"跳过 {date_str}: 本次无基差数据（非交易日或数据源未发布）")
                 continue
             
             df, variety_col = result
@@ -428,7 +431,7 @@ class BasisDataUpdater(ProgressReporter):
                 if self.save_variety_data(variety, variety_data):
                     variety_success += 1
             
-            print(f"  📊 品种更新: 成功 {variety_success}/{variety_total}")
+            logger.info(f"品种更新: 成功 {variety_success}/{variety_total}")
             
             # 添加随机延迟避免请求过快
             if i < len(update_dates) - 1:
@@ -438,16 +441,8 @@ class BasisDataUpdater(ProgressReporter):
         # 完成统计
         self.update_stats["end_time"] = datetime.now()
         
-        print(f"\n📊 更新完成统计:")
-        print(f"  ✅ 成功更新品种: {len(self.update_stats['updated_varieties'])} 个")
-        print(f"  ❌ 失败品种: {len(self.update_stats['failed_varieties'])} 个")
-        print(f"  ⏭️ 跳过品种: {len(self.update_stats['skipped_varieties'])} 个")
-        print(f"  📈 新增记录总数: {self.update_stats['total_new_records']} 条")
-        print(f"  ⏱️ 耗时: {(self.update_stats['end_time'] - self.update_stats['start_time']).total_seconds():.1f} 秒")
-        
-        if self.update_stats["failed_varieties"]:
-            print(f"  ⚠️ 失败品种列表: {', '.join(self.update_stats['failed_varieties'])}")
-        
+        self.log_update_summary()
+
         return self.update_stats
     
     def update_data(self, target_date_str: str, start_date_str: Optional[str] = None, specific_varieties: Optional[List[str]] = None) -> Dict:
@@ -466,29 +461,25 @@ class BasisDataUpdater(ProgressReporter):
 
 def main():
     """交互式主函数"""
-    print("=" * 80)
-    print("📊 基差数据更新器")
-    print("=" * 80)
+    logger.info("基差数据更新器")
     
     updater = BasisDataUpdater()
     
     # 获取现有数据状态
-    print("\n🔍 正在检查现有数据状态...")
+    logger.info("正在检查现有数据状态...")
     latest_date, varieties, info = updater.get_existing_data_status()
     
     if latest_date:
-        print(f"\n📅 当前最新数据日期: {latest_date.strftime('%Y-%m-%d')}")
+        logger.info(f"当前最新数据日期: {latest_date.strftime('%Y-%m-%d')}")
     else:
-        print(f"\n📅 当前暂无数据")
+        logger.warning("当前暂无数据")
     
-    print(f"📦 已有品种数量: {len(varieties)} 个")
+    logger.info(f"已有品种数量: {len(varieties)} 个")
     if varieties:
-        print(f"   品种列表: {', '.join(sorted(varieties)[:20])}{'...' if len(varieties) > 20 else ''}")
+        logger.info(f"品种列表: {', '.join(sorted(varieties)[:20])}{'...' if len(varieties) > 20 else ''}")
     
     # 用户输入更新参数
-    print("\n" + "=" * 80)
-    print("请输入更新参数:")
-    print("-" * 80)
+    logger.info("请输入更新参数:")
     
     # 只输入目标日期，自动从最新数据开始智能增量更新
     default_date = datetime.now().strftime('%Y-%m-%d')
@@ -499,7 +490,7 @@ def main():
     try:
         datetime.strptime(target_date, '%Y-%m-%d')
     except ValueError:
-        print(f"❌ 目标日期格式错误，使用默认日期: {default_date}")
+        logger.error(f"目标日期格式错误，使用默认日期: {default_date}")
         target_date = default_date
     
     # 输入品种
@@ -507,35 +498,31 @@ def main():
     
     if varieties_input:
         specific_varieties = [v.strip().upper() for v in varieties_input.split(',')]
-        print(f"\n✅ 将更新指定品种: {', '.join(specific_varieties)}")
+        logger.info(f"将更新指定品种: {', '.join(specific_varieties)}")
     else:
         specific_varieties = None
-        print(f"\n✅ 将更新所有品种")
+        logger.info("将更新所有品种")
     
     # 确认
-    print("\n" + "=" * 80)
-    print(f"📋 更新配置:")
+    logger.info("更新配置:")
     if latest_date:
-        print(f"   从最新数据日期: {latest_date.strftime('%Y-%m-%d')}")
+        logger.info(f"从最新数据日期: {latest_date.strftime('%Y-%m-%d')}")
     else:
-        print(f"   首次更新: 将获取完整历史数据")
-    print(f"   更新到日期: {target_date}")
-    print(f"   更新品种: {'全部' if not specific_varieties else ', '.join(specific_varieties)}")
-    print(f"   更新模式: 智能增量更新（只更新缺失的数据）")
-    print("=" * 80)
+        logger.info("首次更新: 将获取完整历史数据")
+    logger.info(f"更新到日期: {target_date}")
+    logger.info(f"更新品种: {'全部' if not specific_varieties else ', '.join(specific_varieties)}")
+    logger.info("更新模式: 智能增量更新（只更新缺失的数据）")
     
     confirm = input("\n确认开始更新？(y/N): ").strip().lower()
     if confirm != 'y':
-        print("❌ 已取消更新")
+        logger.error("已取消更新")
         return
     
     # 执行更新（不传入start_date，自动智能更新）
-    print("\n🚀 开始更新...")
+    logger.info("开始更新...")
     result = updater.update_to_date(target_date, start_date_str=None, specific_varieties=specific_varieties)
     
-    print(f"\n" + "=" * 80)
-    print("🎯 更新完成!")
-    print("=" * 80)
+    logger.info("更新完成!")
 
 if __name__ == "__main__":
     main()

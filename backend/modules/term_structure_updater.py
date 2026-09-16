@@ -16,7 +16,10 @@ import warnings
 import re
 import requests
 from typing import Dict, List, Optional, Tuple
+from loguru import logger
+
 from modules.progress import ProgressReporter
+from modules import variety_catalog
 
 warnings.filterwarnings('ignore')
 
@@ -30,11 +33,17 @@ warnings.filterwarnings('ignore')
 # 组装出与官网 get_futures_daily 同构的“全合约日报”，再走统一处理管线。
 # ────────────────────────────────────────────────────────────── #
 
-# 大商所受支持的品种（与 backend/config/commodities.yaml exchange: DCE 一致）
+# 大商所受支持的品种（兜底）：实际范围取自 commodities.yaml 中 exchange: DCE
 DCE_SUPPORTED_SYMBOLS = (
     'A', 'B', 'C', 'CS', 'EB', 'EG', 'I', 'J', 'JD', 'JM',
     'L', 'LH', 'M', 'P', 'PG', 'PP', 'V', 'Y',
 )
+
+
+def dce_supported_symbols() -> tuple:
+    """大商所品种清单：commodities.yaml 的 exchange: DCE，读不到时回退内置常量。"""
+    symbols = variety_catalog.symbols_of_exchange("DCE")
+    return tuple(sorted(symbols)) if symbols else DCE_SUPPORTED_SYMBOLS
 
 # 新浪期货单合约日K（JSONP）：一次返回该合约上市以来全部日线（含已交割）
 _SINA_DAILY_KLINE_URL = (
@@ -73,7 +82,7 @@ def load_symbol_markets() -> Dict[str, str]:
                 if c.get("symbol") and c.get("exchange")
             }
         except Exception as e:  # noqa: BLE001
-            print(f"⚠️ 读取品种交易所映射失败（将扫描全部交易所）: {e}")
+            logger.error(f"读取品种交易所映射失败（将扫描全部交易所）: {e}")
             break
     return {}
 
@@ -124,7 +133,7 @@ class TermStructureUpdater(ProgressReporter):
             varieties: 现有品种列表
             variety_info: 各品种详细信息
         """
-        print("🔍 检查现有期限结构数据状态...")
+        logger.info("检查现有期限结构数据状态...")
         
         varieties = []
         variety_info = {}
@@ -133,7 +142,7 @@ class TermStructureUpdater(ProgressReporter):
             return [], {}
         
         variety_folders = [d for d in self.base_dir.iterdir() if d.is_dir()]
-        print(f"📂 发现 {len(variety_folders)} 个品种文件夹")
+        logger.info(f"发现 {len(variety_folders)} 个品种文件夹")
         
         for folder in variety_folders:
             variety = folder.name
@@ -161,13 +170,13 @@ class TermStructureUpdater(ProgressReporter):
                         }
                         
                         varieties.append(variety)
-                        print(f"  {variety}: {record_count} 条记录 ({variety_earliest.strftime('%Y-%m-%d')} ~ {variety_latest.strftime('%Y-%m-%d')})")
+                        logger.info(f"{variety}: {record_count} 条记录 ({variety_earliest.strftime('%Y-%m-%d')} ~ {variety_latest.strftime('%Y-%m-%d')})")
                         
                 except Exception as e:
-                    print(f"  ❌ {variety}: 读取失败 - {str(e)[:50]}")
+                    logger.error(f"{variety}: 读取失败 - {str(e)[:50]}")
                     self.update_stats["error_messages"].append(f"{variety}: 数据读取失败 - {str(e)}")
         
-        print(f"\n📊 总计: {len(varieties)} 个有效品种")
+        logger.info(f"总计: {len(varieties)} 个有效品种")
         return varieties, variety_info
     
     def calculate_roll_yield(self, current_contract: str, next_contract: str, current_price: float, next_price: float) -> float:
@@ -251,13 +260,16 @@ class TermStructureUpdater(ProgressReporter):
                 return None
         return None
 
-    def _em_dce_contract_codes(self) -> Dict[str, List[str]]:
+    def _em_dce_contract_codes(self, only_varieties: Optional[List[str]] = None) -> Dict[str, List[str]]:
         """
         东财静态目录：大商所各品种“当前挂牌”的真实合约代码。
         msgid=114 -> 品种表(vcode, vtype)；msgid=114_<vtype> -> 该品种合约代码列表。
         仅用于推导候选交割月份（减少逐月盲扫），失败时返回 {}（退化为全月份扫描）。
+
+        Args:
+            only_varieties: 只查询这些品种；为 None 时查询全部并缓存结果。
         """
-        if self._em_dce_codes_cache is not None:
+        if only_varieties is None and self._em_dce_codes_cache is not None:
             return self._em_dce_codes_cache
 
         result: Dict[str, List[str]] = {}
@@ -273,7 +285,7 @@ class TermStructureUpdater(ProgressReporter):
                 if vcode and vtype:
                     vtype_map[vcode] = vtype
 
-            for variety in DCE_SUPPORTED_SYMBOLS:
+            for variety in (only_varieties or dce_supported_symbols()):
                 vtype = vtype_map.get(variety)
                 if not vtype:
                     continue
@@ -295,16 +307,36 @@ class TermStructureUpdater(ProgressReporter):
                 time.sleep(0.1)
         except Exception:
             pass
-        self._em_dce_codes_cache = result
+        if only_varieties is None:
+            self._em_dce_codes_cache = result
         return result
 
-    def _dce_candidate_contracts(self, start_dt: datetime, end_dt: datetime) -> Dict[str, List[str]]:
+    @staticmethod
+    def _dce_target_varieties(only_varieties: Optional[set]) -> Optional[List[str]]:
+        """把“本次待更新品种”收敛到大商所受支持品种。
+
+        Returns:
+            需要抓取的品种列表；None 表示不限制（全品种，兜底策略）。
+        """
+        if not only_varieties:
+            return None
+        wanted = {str(v).strip().upper() for v in only_varieties if str(v).strip()}
+        matched = [v for v in dce_supported_symbols() if v in wanted]
+        if not matched:
+            logger.warning(f"指定品种 {', '.join(sorted(wanted))} 均不属于大商所，降级源按全部品种抓取")
+            return None
+        if len(matched) < len(wanted):
+            logger.debug(f"大商所降级源: 仅抓取 {', '.join(matched)}，其余品种由各自交易所负责")
+        return matched
+
+    def _dce_candidate_contracts(self, start_dt: datetime, end_dt: datetime,
+                                 only_varieties: Optional[List[str]] = None) -> Dict[str, List[str]]:
         """
         推导每个 DCE 品种在 [start, end] 区间“需要抓取的合约代码集合”：
         1. 区间内可能已交割、但新浪仍保留历史的近月合约；
         2. 当前仍在挂牌的远月合约（截至 end 后约一年，与官网“全部月份合约”口径一致）。
         """
-        em_map = self._em_dce_contract_codes()  # 可能为空字典
+        em_map = self._em_dce_contract_codes(only_varieties)  # 可能为空字典
 
         def months_range(frm: datetime, to: datetime):
             """返回 [(year, month), ...]（含首尾），to 不超过两年半，避免无限远扫"""
@@ -317,7 +349,7 @@ class TermStructureUpdater(ProgressReporter):
             return out
 
         candidates: Dict[str, List[str]] = {}
-        for variety in DCE_SUPPORTED_SYMBOLS:
+        for variety in (only_varieties or dce_supported_symbols()):
             em_codes = em_map.get(variety, [])
 
             # 从当前挂牌合约反推该品种的交割月份规律（如 A 只在 1/3/5/7/9/11 交割）
@@ -353,20 +385,29 @@ class TermStructureUpdater(ProgressReporter):
             candidates[variety] = sorted(code_set, key=ym_key)
         return candidates
 
-    def _fetch_dce_daily_from_sina(self, start_date: str, end_date: str) -> Optional[pd.DataFrame]:
+    def _fetch_dce_daily_from_sina(self, start_date: str, end_date: str,
+                                   only_varieties: Optional[set] = None) -> Optional[pd.DataFrame]:
         """
         降级链路：新浪单合约日K 逐合约抓取，组装成与官网 get_futures_daily
         同构的“全合约日报”DataFrame（symbol/date/close/volume/open_interest）。
         已交割月份新浪仍保留历史，故能还原完整多合约期限结构。
+
+        Args:
+            start_date: 开始日期 (YYYYMMDD)
+            end_date: 结束日期 (YYYYMMDD)
+            only_varieties: 本次待更新品种集合；为 None 时抓取全部 DCE 品种。
+                           指定品种时只抓这些品种，避免逐合约抓取带来的无效请求。
 
         Returns:
             DataFrame 或 None（所有品种都没有任何数据时）
         """
         start_dt = datetime.strptime(start_date, '%Y%m%d')
         end_dt = datetime.strptime(end_date, '%Y%m%d')
-        print("  📡 降级数据源: 新浪单合约日K 组装大商所全合约日报...")
+        targets = self._dce_target_varieties(only_varieties)
+        scope = "全部品种" if targets is None else f"{len(targets)} 个品种 ({', '.join(targets)})"
+        logger.warning(f"降级数据源: 新浪单合约日K 组装大商所全合约日报... [范围: {scope}]")
 
-        candidates = self._dce_candidate_contracts(start_dt, end_dt)
+        candidates = self._dce_candidate_contracts(start_dt, end_dt, targets)
         records: List[dict] = []
         consecutive_errors = 0
         variety_got = {}
@@ -381,7 +422,7 @@ class TermStructureUpdater(ProgressReporter):
                 if klines is None:
                     consecutive_errors += 1
                     if consecutive_errors >= 8:
-                        print(f"    ⚠️ 新浪接口连续失败，停止抓取（已获取 {len(records)} 条）")
+                        logger.error(f"新浪接口连续失败，停止抓取（已获取 {len(records)} 条）")
                         break
                     time.sleep(1.0)
                     continue
@@ -406,20 +447,21 @@ class TermStructureUpdater(ProgressReporter):
                 time.sleep(random.uniform(0.08, 0.2))
             if got_rows:
                 variety_got[variety] = got_rows
-                print(f"    ✅ {variety}: {got_rows} 条记录 ({len(codes)} 个合约)")
+                logger.debug(f"{variety}: {got_rows} 条记录 ({len(codes)} 个合约)")
             if consecutive_errors >= 8:
                 break
 
         if not records:
-            print("    ❌ 大商所降级源: 未获取到任何记录")
+            logger.error("大商所降级源: 未获取到任何记录")
             return None
 
         df = pd.DataFrame(records, columns=[
             "symbol", "date", "close", "volume", "open_interest"])
-        print(f"    📊 大商所降级源共获取 {len(df)} 条记录, 覆盖品种 {sorted(variety_got)}")
+        logger.warning(f"大商所降级源共获取 {len(df)} 条记录, 覆盖品种 {sorted(variety_got)}")
         return df
 
-    def fetch_exchange_data(self, exchange: Dict, start_date: str, end_date: str) -> Optional[pd.DataFrame]:
+    def fetch_exchange_data(self, exchange: Dict, start_date: str, end_date: str,
+                            only_varieties: Optional[set] = None) -> Optional[pd.DataFrame]:
         """
         获取交易所数据
         
@@ -427,11 +469,12 @@ class TermStructureUpdater(ProgressReporter):
             exchange: 交易所配置
             start_date: 开始日期 (YYYYMMDD)
             end_date: 结束日期 (YYYYMMDD)
+            only_varieties: 本次待更新品种集合（仅用于降级链路收窄抓取范围）
         
         Returns:
             数据DataFrame或None
         """
-        print(f"  📡 获取 {exchange['name']} 数据 ({start_date} ~ {end_date})...")
+        logger.info(f"获取 {exchange['name']} 数据 ({start_date} ~ {end_date})...")
 
         # 主通道：交易所官方“全合约日报”接口 get_futures_daily。
         # 一次返回该交易所全部品种的全部月份合约（多合约多行），
@@ -439,28 +482,36 @@ class TermStructureUpdater(ProgressReporter):
         # 🔧 修复：此前 DCE 分支误用 futures_main_sina(f"{variety}0") 拉“主力连续”，
         #   每个交易日只有 1 行（symbol 恒为 XX0、roll_yield=0），期限结构曲线完全失真。
         df = None
+        has_fallback = exchange['market'] == 'DCE'
         try:
             df = ak.get_futures_daily(start_date=start_date, end_date=end_date,
                                       market=exchange['market'])
             if df is None or df.empty:
                 df = None
-                print(f"    ⚠️ {exchange['name']}: 官网接口返回空数据")
+                logger.warning(f"{exchange['name']}: 官网接口返回空数据")
         except Exception as e:
             df = None
-            print(f"    ❌ {exchange['name']}: 官网接口获取失败 - {str(e)[:100]}")
+            err = str(e)[:100]
+            # DCE 官网 2025 年起全站瑞数反爬，返回 HTTP 412 挑战页而非 JSON，
+            # akshare 解析时报 "Expecting value: line 1 column 1"，属预期失败且有降级源，
+            # 因此记为 WARNING；其余交易所无降级源，主通道失败即记为 ERROR。
+            if has_fallback:
+                logger.warning(f"{exchange['name']}: 官网接口不可用（反爬拦截，预期内），改用新浪降级源 - {err}")
+            else:
+                logger.error(f"{exchange['name']}: 官网接口获取失败 - {err}")
 
         # 降级通道：DCE 官网全站启用瑞数动态 JS 反爬（HTTP 412），主通道基本必然失败。
         # 此时改走新浪单合约日K（保留已交割合约历史）逐合约组装“全合约日报”。
-        if df is None and exchange['market'] == 'DCE':
-            df = self._fetch_dce_daily_from_sina(start_date, end_date)
+        if df is None and has_fallback:
+            df = self._fetch_dce_daily_from_sina(start_date, end_date, only_varieties)
 
         if df is None:
-            print(f"    ❌ {exchange['name']}: 获取失败")
+            logger.error(f"{exchange['name']}: 获取失败")
             self.update_stats["error_messages"].append(
                 f"{exchange['name']}: 所有数据源均获取失败")
             return None
 
-        print(f"    ✅ {exchange['name']}: 获取到 {len(df)} 条原始记录")
+        logger.debug(f"{exchange['name']}: 获取到 {len(df)} 条原始记录")
         return df
     
     def process_exchange_data(self, df: pd.DataFrame, exchange: Dict,
@@ -496,7 +547,7 @@ class TermStructureUpdater(ProgressReporter):
             # 确保必要的列存在
             required_columns = ['symbol', 'date', 'close']
             if not all(col in df.columns for col in required_columns):
-                print(f"    ❌ {exchange['name']}: 缺少必要列，跳过处理")
+                logger.error(f"{exchange['name']}: 缺少必要列，跳过处理")
                 return variety_data
             
             # 🔧 修复：正确处理日期（避免int64被当作纳秒时间戳）
@@ -568,10 +619,10 @@ class TermStructureUpdater(ProgressReporter):
                 except Exception as e:
                     continue
             
-            print(f"    📊 {exchange['name']}: 处理得到 {len(variety_data)} 个品种")
+            logger.debug(f"{exchange['name']}: 处理得到 {len(variety_data)} 个品种")
             
         except Exception as e:
-            print(f"    ❌ {exchange['name']}: 数据处理失败 - {str(e)[:100]}")
+            logger.error(f"{exchange['name']}: 数据处理失败 - {str(e)[:100]}")
         
         return variety_data
     
@@ -614,7 +665,7 @@ class TermStructureUpdater(ProgressReporter):
             return variety_df
             
         except Exception as e:
-            print(f"      ⚠️ 计算指标时出错: {str(e)[:50]}")
+            logger.warning(f"计算指标时出错: {str(e)[:50]}")
             if 'roll_yield' not in variety_df.columns:
                 variety_df['roll_yield'] = 0.0
             return variety_df
@@ -639,7 +690,7 @@ class TermStructureUpdater(ProgressReporter):
             new_data = new_data[new_data['date_dt'] >= '2000-01-01']  # 过滤2000年之前的数据
             
             if len(new_data) == 0:
-                print(f"    ⚠️ {variety}: 过滤后无有效数据（可能全是1970异常数据）")
+                logger.error(f"{variety}: 过滤后无有效数据（可能全是1970异常数据）")
                 self.update_stats["skipped_varieties"].append(variety)
                 return True
             
@@ -670,7 +721,7 @@ class TermStructureUpdater(ProgressReporter):
                         ~existing_df['symbol'].astype(str).apply(
                             lambda s: bool(_CONTINUOUS_SYMBOL_RE.match(s)))]
                     if len(existing_df) != old_len:
-                        print(f"    🧹 {variety}: 清理 {old_len - len(existing_df)} 条主力连续(XX0)脏数据")
+                        logger.debug(f"{variety}: 清理 {old_len - len(existing_df)} 条主力连续(XX0)脏数据")
                 
                 if len(existing_df) == 0:
                     # 如果现有数据清理后为空（含“全是 XX0 主连”的情况），视为全新写入
@@ -714,7 +765,7 @@ class TermStructureUpdater(ProgressReporter):
                         new_min = filtered_new_data['date_dt'].min().strftime('%Y-%m-%d')
                         new_max = filtered_new_data['date_dt'].max().strftime('%Y-%m-%d')
                         
-                        print(f"    ✅ {variety}: 新增 {new_record_count} 条 ({new_min} ~ {new_max})")
+                        logger.debug(f"{variety}: 新增 {new_record_count} 条 ({new_min} ~ {new_max})")
                         self.update_stats["updated_varieties"].append(variety)
                         self.update_stats["total_new_records"] += new_record_count
                         
@@ -722,20 +773,20 @@ class TermStructureUpdater(ProgressReporter):
                         combined_df.to_csv(ts_file, index=False, encoding='utf-8-sig')
                         return True
                     else:
-                        print(f"    ℹ️ {variety}: 去重后无新数据")
+                        logger.debug(f"{variety}: 去重后无新数据")
                         self.update_stats["skipped_varieties"].append(variety)
                         return True
                 else:
                     if existing_info is not None and latest_date is not None:
-                        print(f"    ℹ️ {variety}: 已是最新 (现有: {latest_date.strftime('%Y-%m-%d')})")
+                        logger.debug(f"{variety}: 已是最新 (现有: {latest_date.strftime('%Y-%m-%d')})")
                     else:
-                        print(f"    ℹ️ {variety}: 无新增数据")
+                        logger.debug(f"{variety}: 无新增数据")
                     self.update_stats["skipped_varieties"].append(variety)
                     return True
             else:
                 # 新品种或无现有数据
                 combined_df = new_data.drop(columns=['date_dt'])
-                print(f"    ✅ {variety}: 创建 {len(combined_df)} 条记录 (新品种)")
+                logger.debug(f"{variety}: 创建 {len(combined_df)} 条记录 (新品种)")
                 self.update_stats["new_varieties"].append(variety)
                 self.update_stats["total_new_records"] += len(combined_df)
                 
@@ -744,7 +795,7 @@ class TermStructureUpdater(ProgressReporter):
                 return True
             
         except Exception as e:
-            print(f"    ❌ {variety}: 保存失败 - {str(e)}")
+            logger.error(f"{variety}: 保存失败 - {str(e)}")
             self.update_stats["failed_varieties"].append(variety)
             self.update_stats["error_messages"].append(f"{variety}: 保存失败 - {str(e)}")
             return False
@@ -761,8 +812,7 @@ class TermStructureUpdater(ProgressReporter):
         Returns:
             更新结果统计
         """
-        print(f"🚀 期限结构数据更新器")
-        print("=" * 60)
+        logger.info("期限结构数据更新器")
         
         # 解析目标日期
         try:
@@ -791,13 +841,13 @@ class TermStructureUpdater(ProgressReporter):
                 min_lookback = 90  # 至少回溯90天
                 update_days = max(calculated_days, min_lookback)
                 
-                print(f"📊 智能更新: 从 {overall_latest.strftime('%Y-%m-%d')} 更新到 {target_date_str}")
-                print(f"   回溯天数: {update_days} 天 (最新品种需{calculated_days}天，保证覆盖所有品种需{min_lookback}天)")
+                logger.info(f"智能更新: 从 {overall_latest.strftime('%Y-%m-%d')} 更新到 {target_date_str}")
+                logger.info(f"回溯天数: {update_days} 天 (最新品种需{calculated_days}天，保证覆盖所有品种需{min_lookback}天)")
             else:
-                print(f"📊 首次更新: 获取最近90天数据")
+                logger.info("首次更新: 获取最近90天数据")
                 update_days = 90
         else:
-            print(f"📊 指定天数: 更新最近 {update_days} 天")
+            logger.info(f"指定天数: 更新最近 {update_days} 天")
         
         self.update_stats["update_days"] = update_days
         
@@ -806,7 +856,7 @@ class TermStructureUpdater(ProgressReporter):
         start_date_str = start_date.strftime('%Y%m%d')
         end_date_str = target_date.strftime('%Y%m%d')
         
-        print(f"📅 更新日期范围: {start_date_str} - {end_date_str}")
+        logger.info(f"更新日期范围: {start_date_str} - {end_date_str}")
         
         # 确定本次实际品种范围：交易所官方接口一次返回该交易所全部品种，
         # 因此“指定品种”必须在取数前就定位到相关交易所，否则会拉全市场。
@@ -814,35 +864,35 @@ class TermStructureUpdater(ProgressReporter):
         exchanges_to_scan = self.exchanges
         if specific_varieties:
             only_varieties = {str(v).strip().upper() for v in specific_varieties if str(v).strip()}
-            print(f"🎯 指定更新品种: {len(only_varieties)} 个 -> {', '.join(sorted(only_varieties))}")
+            logger.info(f"指定更新品种: {len(only_varieties)} 个 -> {', '.join(sorted(only_varieties))}")
 
             symbol_markets = load_symbol_markets()
             unknown = sorted(s for s in only_varieties if s not in symbol_markets)
             if unknown:
-                print(f"⚠️ 以下品种未在 config/commodities.yaml 中配置，无法定位交易所，将扫描全部交易所: {', '.join(unknown)}")
+                logger.warning(f"以下品种未在 config/commodities.yaml 中配置，无法定位交易所，将扫描全部交易所: {', '.join(unknown)}")
             else:
                 target_markets = {symbol_markets[s] for s in only_varieties}
                 exchanges_to_scan = [e for e in self.exchanges if e["market"] in target_markets]
                 skipped = [e for e in self.exchanges if e["market"] not in target_markets]
                 if skipped:
-                    print(f"⏭️ 本次品种只属于 {', '.join(e['name'] for e in exchanges_to_scan)}，"
+                    logger.warning(f"本次品种只属于 {', '.join(e['name'] for e in exchanges_to_scan)}，"
                           f"跳过无关交易所: {', '.join(e['name'] for e in skipped)}")
                 if not exchanges_to_scan:
-                    print("❌ 指定品种均无法匹配到受支持的交易所，终止更新")
+                    logger.error("指定品种均无法匹配到受支持的交易所，终止更新")
                     self.update_stats["end_time"] = datetime.now()
                     return self.update_stats
         else:
-            print("🎯 全品种更新")
+            logger.info("全品种更新")
         
         # 按交易所获取数据
         all_variety_data = {}
         
         for _ex_i, exchange in enumerate(exchanges_to_scan, 1):
             self._report_progress("拉取交易所行情", _ex_i, len(exchanges_to_scan), exchange["name"])
-            print(f"\n🔄 处理 {exchange['name']}...")
+            logger.info(f"处理 {exchange['name']}...")
             
             # 获取交易所数据
-            exchange_df = self.fetch_exchange_data(exchange, start_date_str, end_date_str)
+            exchange_df = self.fetch_exchange_data(exchange, start_date_str, end_date_str, only_varieties)
             if exchange_df is None:
                 self.update_stats["exchange_stats"][exchange['name']] = {"status": "failed", "varieties": 0}
                 continue
@@ -868,12 +918,12 @@ class TermStructureUpdater(ProgressReporter):
             time.sleep(random.uniform(1, 2))
         
         # 处理并保存各品种数据
-        print(f"\n💾 保存各品种数据...")
+        logger.info("保存各品种数据...")
         processed_count = 0
         
         for _sv_i, (variety, data_list) in enumerate(all_variety_data.items(), 1):
             self._report_progress("计算并保存期限结构", _sv_i, len(all_variety_data), variety)
-            print(f"\n  处理品种: {variety}")
+            logger.info(f"处理品种: {variety}")
             
             try:
                 # 合并该品种的所有数据
@@ -883,7 +933,7 @@ class TermStructureUpdater(ProgressReporter):
                 variety_df = self.calculate_term_structure_metrics(variety_df)
                 
                 if variety_df.empty:
-                    print(f"    ⚠️ {variety}: 无有效数据")
+                    logger.warning(f"{variety}: 无有效数据")
                     continue
                 
                 # 保存数据
@@ -892,32 +942,22 @@ class TermStructureUpdater(ProgressReporter):
                     processed_count += 1
                     
             except Exception as e:
-                print(f"    ❌ {variety}: 处理失败 - {str(e)}")
+                logger.error(f"{variety}: 处理失败 - {str(e)}")
                 self.update_stats["failed_varieties"].append(variety)
                 self.update_stats["error_messages"].append(f"{variety}: 处理失败 - {str(e)}")
         
         # 生成统计报告
         self.update_stats["end_time"] = datetime.now()
-        elapsed_time = (self.update_stats["end_time"] - self.update_stats["start_time"]).total_seconds()
         
-        print(f"\n📊 更新完成统计:")
-        print(f"  ✅ 成功更新品种: {len(self.update_stats['updated_varieties'])} 个")
-        print(f"  🆕 新增品种: {len(self.update_stats['new_varieties'])} 个")
-        print(f"  ❌ 失败品种: {len(self.update_stats['failed_varieties'])} 个")
-        print(f"  ⏭️ 跳过品种: {len(self.update_stats['skipped_varieties'])} 个")
-        print(f"  📈 新增记录总数: {self.update_stats['total_new_records']} 条")
-        print(f"  ⏱️ 耗时: {elapsed_time:.1f} 秒")
-        
+        self.log_update_summary()
+
         if self.update_stats["exchange_stats"]:
-            print(f"\n📋 交易所数据获取统计:")
+            logger.info("交易所数据获取统计:")
             for exchange_name, stats in self.update_stats["exchange_stats"].items():
-                status_icon = "✅" if stats["status"] == "success" else "❌"
-                print(f"  {status_icon} {exchange_name}: {stats['varieties']} 个品种")
-        
-        if self.update_stats["error_messages"]:
-            print(f"\n⚠️ 错误信息:")
-            for msg in self.update_stats["error_messages"][:10]:
-                print(f"  • {msg}")
+                if stats["status"] == "success":
+                    logger.info(f"{exchange_name}: {stats['varieties']} 个品种")
+                else:
+                    logger.warning(f"{exchange_name}: {stats['varieties']} 个品种（获取失败）")
         
         return self.update_stats
 
@@ -938,12 +978,9 @@ def main():
     """主函数"""
     import sys
     
-    print("\n" + "=" * 80)
-    print("🎯 期限结构数据更新器".center(76))
-    print("=" * 80)
-    print("\n📌 更新模式: 智能增量更新（自动从最新数据补全到目标日期）")
-    print("\n请输入更新参数:\n")
-    print("-" * 80)
+    logger.info("期限结构数据更新器")
+    logger.info("更新模式: 智能增量更新（自动从最新数据补全到目标日期）")
+    logger.info("请输入更新参数:")
     
     # 获取目标日期
     target_date = input(f"📅 目标日期 (格式: YYYY-MM-DD, 直接回车使用今天 {datetime.now().strftime('%Y-%m-%d')}): ").strip()
@@ -954,27 +991,23 @@ def main():
     varieties_input = input("🎯 要更新的品种 (输入品种代码用逗号分隔，如 RB,CU,AL；直接回车更新全部): ").strip()
     varieties = [v.strip().upper() for v in varieties_input.split(',')] if varieties_input else None
     
-    print("\n" + "=" * 80)
-    print(f"开始更新期限结构数据到 {target_date}")
+    logger.info(f"开始更新期限结构数据到 {target_date}")
     if varieties:
-        print(f"指定品种: {', '.join(varieties)}")
-    print("=" * 80 + "\n")
+        logger.info(f"指定品种: {', '.join(varieties)}")
     
     try:
         updater = TermStructureUpdater()
         result = updater.update_to_date(target_date, specific_varieties=varieties)
         
-        print("\n" + "=" * 80)
-        print("✅ 更新完成！".center(76))
-        print("=" * 80)
+        logger.info("更新完成!")
         
         input("\n按回车键退出...")
         
     except KeyboardInterrupt:
-        print("\n\n⚠️ 用户中断更新")
+        logger.warning("用户中断更新")
         sys.exit(1)
     except Exception as e:
-        print(f"\n\n❌ 更新失败: {str(e)}")
+        logger.error(f"更新失败: {str(e)}")
         import traceback
         traceback.print_exc()
         input("\n按回车键退出...")

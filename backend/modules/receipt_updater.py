@@ -21,40 +21,52 @@ import time
 import random
 from typing import Dict, List, Optional, Tuple
 from modules.progress import ProgressReporter
+from modules import variety_catalog
+from loguru import logger
 
 # 品种映射配置（与库存相同）
 SYMBOL_MAPPING = {
     'A': '豆一', 'AG': '沪银', 'AL': '沪铝', 'AO': '氧化铝', 'AP': '苹果',
     'AU': '沪金', 'B': '豆二', 'BR': '丁二烯橡胶', 'BU': '沥青', 'C': '玉米',
-    'CF': '郑棉', 'CJ': '红枣', 'CS': '玉米淀粉', 'CU': '沪铜', 'CY': '棉纱',
+    'CF': '郑棉', 'CJ': '红枣', 'CS': '玉米淀粉', 'CU': '沪铜', 'EC': '集运指数',
     'EB': '苯乙烯', 'EG': '乙二醇', 'FG': '玻璃', 'FU': '燃油', 'HC': '热卷',
     'I': '铁矿石', 'J': '焦炭', 'JD': '鸡蛋', 'JM': '焦煤', 'L': '塑料',
-    'LC': '碳酸锂', 'LG': '原木', 'LH': '生猪', 'LU': '低硫燃料油', 'M': '豆粕',
+    # 注：LG(原木)、RS(菜籽) 成交清淡，不纳入更新范围
+    'LC': '碳酸锂', 'LH': '生猪', 'LU': '低硫燃料油', 'M': '豆粕',
     'MA': '甲醇', 'NI': '镍', 'NR': '20号胶', 'OI': '菜油', 'P': '棕榈',
     'PB': '沪铅', 'PF': '短纤', 'PG': '液化石油气', 'PK': '花生', 'PP': '聚丙烯',
-    'PR': '瓶片', 'PS': '多晶硅', 'PTA': 'PTA', 'PX': '对二甲苯', 'RB': '螺纹钢',
-    'RM': '菜粕', 'RS': '菜籽', 'RU': '橡胶', 'SA': '纯碱', 'SF': '硅铁',
+    'PR': '瓶片', 'PS': '多晶硅', 'PX': '对二甲苯', 'RB': '螺纹钢',
+    'RM': '菜粕', 'RU': '橡胶', 'SA': '纯碱', 'SF': '硅铁',
     'SH': '烧碱', 'SI': '工业硅', 'SM': '锰硅', 'SN': '锡', 'SP': '纸浆',
     'SR': '白糖', 'SS': '不锈钢', 'TA': 'PTA', 'UR': '尿素', 'V': 'PVC',
-    'WR': '线材', 'Y': '豆油', 'ZN': '沪锌', 'ZC': '动力煤'
+    'Y': '豆油', 'ZN': '沪锌'
+    # 注：WR(线材)、RR(粳米)、ZC(动力煤)、LG(原木)、RS(菜籽) 成交清淡/已退市，不纳入更新范围
 }
 
 # 交易所归属（akshare 仓单日报按交易所提供）
 SHFE_SYMBOLS = {'AG', 'AL', 'AO', 'AU', 'BR', 'BU', 'CU', 'FU', 'HC', 'NI',
-                'PB', 'RB', 'RU', 'SN', 'SP', 'SS', 'WR', 'ZN'}
+                'PB', 'RB', 'RU', 'SN', 'SP', 'SS', 'ZN'}
 DCE_SYMBOLS = {'A', 'B', 'C', 'CS', 'EB', 'EG', 'I', 'J', 'JD', 'JM', 'L',
-               'LG', 'LH', 'M', 'P', 'PG', 'PP', 'RR', 'V', 'Y'}
-CZCE_SYMBOLS = {'AP', 'CF', 'CJ', 'CY', 'FG', 'MA', 'OI', 'PF', 'PK', 'PR',
-                'PTA', 'PX', 'RM', 'RS', 'SA', 'SF', 'SH', 'SM', 'SR', 'TA',
-                'UR', 'ZC'}
+               'LH', 'M', 'P', 'PG', 'PP', 'V', 'Y'}
+CZCE_SYMBOLS = {'AP', 'CF', 'CJ', 'FG', 'MA', 'OI', 'PF', 'PK', 'PR',
+                'PX', 'RM', 'SA', 'SF', 'SH', 'SM', 'SR', 'TA',
+                'UR'}
 GFEX_SYMBOLS = {'LC', 'PS', 'SI'}
-# akshare 未提供仓单日报的交易所（如能源中心 LU/NR 等），无法获取官方仓单
-UNSUPPORTED_SYMBOLS = {'LU', 'NR', 'SC', 'BC'}
+# akshare 提供仓单日报的交易所（能源中心 INE 等无官方仓单接口）
+SUPPORTED_EXCHANGES = ('SHFE', 'DCE', 'CZCE', 'GFEX')
+UNSUPPORTED_SYMBOLS = {'LU', 'NR', 'SC', 'BC', 'EC'}
 
 
 def exchange_of_symbol(symbol: str) -> Optional[str]:
-    """返回品种所在交易所（用于仓单日报取数），未知返回 None"""
+    """返回品种所在交易所（用于仓单日报取数），未知返回 None
+
+    交易所归属以 commodities.yaml 的 exchange 字段为准，内置集合仅作兜底，
+    避免新增品种必须改代码才能取到仓单。
+    """
     s = symbol.upper()
+    exchange = variety_catalog.exchange_map().get(s)
+    if exchange in SUPPORTED_EXCHANGES:
+        return exchange
     if s in SHFE_SYMBOLS:
         return 'SHFE'
     if s in DCE_SYMBOLS:
@@ -68,7 +80,7 @@ def exchange_of_symbol(symbol: str) -> Optional[str]:
 # 上期所日报字典的键是中文品种名（如“铜”“螺纹钢”），给出短名匹配
 SHFE_VARNAME_RULES = {
     'CU': '铜', 'AL': '铝', 'ZN': '锌', 'PB': '铅', 'NI': '镍', 'SN': '锡',
-    'AU': '金', 'AG': '银', 'RB': '螺纹', 'WR': '线材', 'HC': '热卷',
+    'AU': '金', 'AG': '银', 'RB': '螺纹', 'HC': '热卷',
     'FU': '燃油', 'BU': '沥青', 'RU': '橡胶', 'SS': '不锈钢',
     'AO': '氧化铝', 'BR': '丁二烯', 'SP': '漂针',
 }
@@ -142,7 +154,7 @@ class ReceiptDataUpdater(ProgressReporter):
             varieties: 现有品种列表
             variety_info: 各品种详细信息
         """
-        print("🔍 检查现有仓单数据状态...")
+        logger.info("检查现有仓单数据状态...")
 
         varieties = []
         variety_info = {}
@@ -152,7 +164,7 @@ class ReceiptDataUpdater(ProgressReporter):
 
         # 扫描品种文件夹
         variety_folders = [d for d in self.base_dir.iterdir() if d.is_dir()]
-        print(f"📂 发现 {len(variety_folders)} 个品种文件夹")
+        logger.info(f"发现 {len(variety_folders)} 个品种文件夹")
 
         for folder in variety_folders:
             variety = folder.name
@@ -176,13 +188,13 @@ class ReceiptDataUpdater(ProgressReporter):
                                 "latest_date": df['date'].max(),
                                 "earliest_date": df['date'].min()
                             }
-                            print(f"   ✅ {variety}: {len(df)} 条记录，最新 {df['date'].max().strftime('%Y-%m-%d')}")
+                            logger.info(f"{variety}: {len(df)} 条记录，最新 {df['date'].max().strftime('%Y-%m-%d')}")
                         else:
-                            print(f"   ⚠️ {variety}: 缺少数据列")
+                            logger.warning(f"{variety}: 缺少数据列")
                 except Exception as e:
-                    print(f"   ⚠️ {variety}: 读取失败 - {str(e)}")
+                    logger.warning(f"{variety}: 读取失败 - {str(e)}")
 
-        print(f"\n📊 总计: {len(varieties)} 个有效品种")
+        logger.info(f"总计: {len(varieties)} 个有效品种")
         return varieties, variety_info
 
     # ---------- 按交易所抓取单个交易日的仓单总量 ----------
@@ -212,7 +224,13 @@ class ReceiptDataUpdater(ProgressReporter):
                 self._day_cache[key] = None
                 return None
         except Exception as e:
-            # 非交易日/官网无文件等，不重试，直接视为该日无数据
+            # 非交易日、官网当日未发布、官网反爬都会走到这里，统一按“该日无数据”处理；
+            # 但必须留下可辨识的日志，否则大商所瑞数反爬会被误当成“数据已最新”。
+            detail = str(e)[:80]
+            if any(k in detail for k in ("Expecting value", "412", "JSONDecode", "BadZipFile", "list index")):
+                logger.warning(f"{exchange} {date_compact}: 仓单日报获取失败（官网疑似反爬拦截/无文件）- {detail}")
+            else:
+                logger.debug(f"{exchange} {date_compact}: 无仓单数据（非交易日或官网未发布）- {detail}")
             result = {}
 
         # 无任何品种返回时同样标记为“该日无数据”
@@ -351,7 +369,7 @@ class ReceiptDataUpdater(ProgressReporter):
                     dates.append(cur.strftime('%Y%m%d'))
                 cur += timedelta(days=1)
         else:
-            print(f"    📅 首次更新，回补最近 {FIRST_RUN_SESSIONS} 个交易日仓单")
+            logger.debug(f"首次更新，回补最近 {FIRST_RUN_SESSIONS} 个交易日仓单")
             dates = _weekdays_until(target_date, FIRST_RUN_SESSIONS)
 
         if not dates:
@@ -395,15 +413,21 @@ class ReceiptDataUpdater(ProgressReporter):
 
         target_date = datetime.strptime(target_date_str, '%Y-%m-%d')
 
-        print(f"\n🎯 目标日期: {target_date_str}")
-        print("=" * 80)
+        logger.info(f"目标日期: {target_date_str}")
 
-        # 确定要更新的品种
+        # 确定要更新的品种：范围取自 commodities.yaml，内置字典只提供仓单接口用的中文系列名
+        # 取品种范围的并集：commodities.yaml 为主，内置字典补充配置中尚未登记的老品种
+        cfg_symbols = variety_catalog.symbols()
+        all_symbols = cfg_symbols + [s for s in SYMBOL_MAPPING if s not in cfg_symbols]
         if specific_varieties:
-            varieties_to_update = [(code.upper(), SYMBOL_MAPPING.get(code.upper(), code))
-                                   for code in specific_varieties if code.upper() in SYMBOL_MAPPING]
+            wanted = [str(c).strip().upper() for c in specific_varieties if str(c).strip()]
         else:
-            varieties_to_update = list(SYMBOL_MAPPING.items())
+            wanted = all_symbols
+        wanted = list(dict.fromkeys(wanted))
+        cfg_names = variety_catalog.name_map()
+        varieties_to_update = [
+            (s, SYMBOL_MAPPING.get(s) or cfg_names.get(s) or s) for s in wanted
+        ]
 
         # 剔除不支持交易所的品种（akshare 无对应官方仓单接口）
         supported = []
@@ -416,16 +440,16 @@ class ReceiptDataUpdater(ProgressReporter):
                 unsupported.append(symbol)
 
         if unsupported:
-            print(f"⚠️ 以下品种 akshare 暂无官方仓单接口，跳过: {', '.join(sorted(unsupported))}")
+            logger.warning(f"以下品种 akshare 暂无官方仓单接口，跳过: {', '.join(sorted(unsupported))}")
 
-        print(f"📋 计划更新 {len(supported)} 个品种（交易所官方仓单日报）")
-        print("=" * 80)
+        logger.info(f"计划更新 {len(supported)} 个品种（交易所官方仓单日报）")
 
         # 更新每个品种
         for idx, (symbol, series_cn, exchange) in enumerate(supported, 1):
+            if idx > 1:
+                time.sleep(random.uniform(0.2, 0.5))  # 控制抓取节奏，降低被官网限流风险
             self._report_progress("处理品种(交易所仓单)", idx, len(supported), symbol)
-            print(f"\n[{idx}/{len(supported)}] 处理品种: {symbol} ({series_cn}, {exchange})")
-            print("-" * 80)
+            logger.info(f"[{idx}/{len(supported)}] 处理品种: {symbol} ({series_cn}, {exchange})")
 
             variety_dir = self.base_dir / symbol
             variety_dir.mkdir(parents=True, exist_ok=True)
@@ -435,7 +459,7 @@ class ReceiptDataUpdater(ProgressReporter):
             new_data = self.fetch_variety_history(symbol, exchange, target_date)
 
             if new_data is None:
-                print(f"   ⏭️ 跳过 {symbol}（数据已最新或无新仓单记录）")
+                logger.warning(f"跳过 {symbol}（本次无新增仓单；若长期为空，请检查 {exchange} 仓单日报是否被反爬拦截）")
                 self.update_stats["skipped_varieties"].append(symbol)
                 continue
 
@@ -463,38 +487,28 @@ class ReceiptDataUpdater(ProgressReporter):
                     new_records = len(combined) - len(old_data)
                     combined.to_csv(receipt_file, index=False, encoding='utf-8-sig')
 
-                    print(f"   ✅ 更新成功: 新增 {new_records} 条记录（共 {len(combined)} 条）")
+                    logger.info(f"{symbol}: 更新成功，新增 {new_records} 条记录（共 {len(combined)} 条）")
                     self.update_stats["updated_varieties"].append(symbol)
                     self.update_stats["total_new_records"] += new_records
 
                 except Exception as e:
-                    print(f"   ❌ 更新失败: {str(e)}")
+                    logger.error(f"{symbol}: 更新失败 - {str(e)}")
                     self.update_stats["failed_varieties"].append(symbol)
             else:
                 # 首次创建
                 try:
                     new_data.to_csv(receipt_file, index=False, encoding='utf-8-sig')
-                    print(f"   🆕 创建新文件: {len(new_data)} 条记录")
+                    logger.info(f"{symbol}: 创建新文件，写入 {len(new_data)} 条记录")
                     self.update_stats["new_varieties"].append(symbol)
                     self.update_stats["total_new_records"] += len(new_data)
                 except Exception as e:
-                    print(f"   ❌ 创建失败: {str(e)}")
+                    logger.error(f"{symbol}: 创建失败 - {str(e)}")
                     self.update_stats["failed_varieties"].append(symbol)
 
         self.update_stats["end_time"] = datetime.now()
 
-        # 打印统计
-        print("\n" + "=" * 80)
-        print(f"\n📊 更新完成统计:")
-        print(f"  ✅ 成功更新品种: {len(self.update_stats['updated_varieties'])} 个")
-        print(f"  🆕 新增品种: {len(self.update_stats['new_varieties'])} 个")
-        print(f"  ❌ 失败品种: {len(self.update_stats['failed_varieties'])} 个")
-        print(f"  ⏭️ 跳过品种: {len(self.update_stats['skipped_varieties'])} 个")
-        print(f"  📈 新增记录总数: {self.update_stats['total_new_records']} 条")
-        print(f"  ⏱️ 耗时: {(self.update_stats['end_time'] - self.update_stats['start_time']).total_seconds():.1f} 秒")
-
-        if self.update_stats["failed_varieties"]:
-            print(f"  ⚠️ 失败品种列表: {', '.join(self.update_stats['failed_varieties'])}")
+        # 输出更新汇总日志
+        self.log_update_summary()
 
         return self.update_stats
 
@@ -514,19 +528,17 @@ class ReceiptDataUpdater(ProgressReporter):
 
 def main():
     """交互式主函数"""
-    print("=" * 80)
-    print("📜 仓单数据更新器（交易所官方仓单日报）")
-    print("=" * 80)
+    logger.info("仓单数据更新器（交易所官方仓单日报）")
 
     updater = ReceiptDataUpdater()
 
     # 获取现有数据状态
-    print("\n🔍 正在检查现有数据状态...")
+    logger.info("正在检查现有数据状态...")
     varieties, info = updater.get_existing_data_status()
 
-    print(f"\n📦 已有品种数量: {len(varieties)} 个")
+    logger.info(f"已有品种数量: {len(varieties)} 个")
     if varieties:
-        print(f"   品种列表: {', '.join(sorted(varieties)[:20])}{'...' if len(varieties) > 20 else ''}")
+        logger.info(f"品种列表: {', '.join(sorted(varieties)[:20])}{'...' if len(varieties) > 20 else ''}")
 
         # 显示最新日期
         if info:
@@ -536,14 +548,12 @@ def main():
                     latest_dates[v] = v_info['latest_date']
             if latest_dates:
                 overall_latest = max(latest_dates.values())
-                print(f"📅 当前最新数据日期: {overall_latest.strftime('%Y-%m-%d')}")
+                logger.info(f"当前最新数据日期: {overall_latest.strftime('%Y-%m-%d')}")
     else:
-        print("📅 当前暂无数据")
+        logger.warning("当前暂无数据")
 
     # 用户输入更新参数
-    print("\n" + "=" * 80)
-    print("请输入更新参数:")
-    print("-" * 80)
+    logger.info("请输入更新参数:")
 
     # 输入目标日期
     default_date = datetime.now().strftime('%Y-%m-%d')
@@ -554,7 +564,7 @@ def main():
     try:
         datetime.strptime(target_date, '%Y-%m-%d')
     except ValueError:
-        print(f"❌ 日期格式错误，使用默认日期: {default_date}")
+        logger.error(f"日期格式错误，使用默认日期: {default_date}")
         target_date = default_date
 
     # 输入品种
@@ -562,30 +572,26 @@ def main():
 
     if varieties_input:
         specific_varieties = [v.strip().upper() for v in varieties_input.split(',')]
-        print(f"\n✅ 将更新指定品种: {', '.join(specific_varieties)}")
+        logger.info(f"将更新指定品种: {', '.join(specific_varieties)}")
     else:
         specific_varieties = None
-        print(f"\n✅ 将更新所有品种")
+        logger.info("将更新所有品种")
 
     # 确认
-    print("\n" + "=" * 80)
-    print(f"📋 更新配置:")
-    print(f"   目标日期: {target_date}")
-    print(f"   更新品种: {'全部' if not specific_varieties else ', '.join(specific_varieties)}")
-    print("=" * 80)
+    logger.info("更新配置:")
+    logger.info(f"目标日期: {target_date}")
+    logger.info(f"更新品种: {'全部' if not specific_varieties else ', '.join(specific_varieties)}")
 
     confirm = input("\n确认开始更新？(y/N): ").strip().lower()
     if confirm != 'y':
-        print("❌ 已取消更新")
+        logger.error("已取消更新")
         return
 
     # 执行更新
-    print("\n🚀 开始更新...")
+    logger.info("开始更新...")
     result = updater.update_to_date(target_date, specific_varieties)
 
-    print(f"\n" + "=" * 80)
-    print("🎯 更新完成!")
-    print("=" * 80)
+    logger.info("更新完成!")
 
 
 if __name__ == "__main__":

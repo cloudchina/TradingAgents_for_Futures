@@ -4,38 +4,30 @@
 商品期货 Trading Agents 系统 - FastAPI 后端
 """
 import sys
-import os
 from pathlib import Path
 from contextlib import asynccontextmanager
-from loguru import logger
-
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 
 # 确保项目根目录在 path 中
 PROJECT_ROOT = Path(__file__).parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from core.settings import settings
-from core.llm_config import llm_config
-from routers import analysis, data, llm, scheduled, system
+from core.logging import setup_logging  # noqa: E402
+from core.settings import settings  # noqa: E402
 
+# 统一日志：控制台 INFO + 文件 DEBUG（内部已处理 Windows GBK 控制台导致的编码问题）
+# 需在业务模块导入前完成，否则导入期的日志会走 loguru 默认格式
+setup_logging(logs_dir=settings.LOGS_DIR, console_level="INFO", file_level="DEBUG")
 
-# Windows 下若 stdout/stderr 非 UTF-8（如管道/重定向运行且代码页为 GBK），
-# print/日志含 emoji(🚀✅❌等) 会抛 UnicodeEncodeError，这里统一重配置为 UTF-8
-for _stream in (sys.stdout, sys.stderr):
-    try:
-        _stream.reconfigure(encoding="utf-8", errors="replace")
-    except Exception:
-        pass
+# 取数模块大多经由 akshare 请求第三方数据源且不设超时，统一注入默认超时避免任务被永久阻塞
+install_default_timeout()
 
-# 配置日志
-logger.remove()
-logger.add(sys.stderr, level="INFO", format="<green>{time:HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>")
-log_dir = Path(settings.LOGS_DIR)
-log_dir.mkdir(parents=True, exist_ok=True)
-logger.add(str(log_dir / "backend.log"), rotation="10 MB", retention="7 days", level="DEBUG")
+from loguru import logger  # noqa: E402
+
+from fastapi import FastAPI  # noqa: E402
+from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
+from core.llm_config import llm_config  # noqa: E402
+from core.net import install_default_timeout  # noqa: E402
+from routers import analysis, data, llm, scheduled, system  # noqa: E402
 
 
 @asynccontextmanager

@@ -90,6 +90,10 @@ commodities:
     name: 国际铜
     exchange: INE
     category: 有色金属
+  - symbol: EC
+    name: 集运指数(欧线)
+    exchange: INE
+    category: 航运
 
   # ── 大连商品交易所 (DCE) ──
   - symbol: A
@@ -174,10 +178,6 @@ commodities:
     name: 棉花
     exchange: CZCE
     category: 农产品
-  - symbol: CY
-    name: 棉纱
-    exchange: CZCE
-    category: 农产品
   - symbol: AP
     name: 苹果
     exchange: CZCE
@@ -230,6 +230,10 @@ commodities:
     name: 烧碱
     exchange: CZCE
     category: 能源化工
+  - symbol: PR
+    name: 瓶片
+    exchange: CZCE
+    category: 能源化工
   - symbol: SF
     name: 硅铁
     exchange: CZCE
@@ -246,5 +250,9 @@ commodities:
     category: 有色金属
   - symbol: LC
     name: 碳酸锂
+    exchange: GFEX
+    category: 有色金属
+  - symbol: PS
+    name: 多晶硅
     exchange: GFEX
     category: 有色金属

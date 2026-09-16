@@ -26,6 +26,7 @@ from typing import Dict, List, Optional, Tuple
 import akshare as ak
 import pandas as pd
 from modules.progress import ProgressReporter
+from loguru import logger
 
 
 def normalize_contract(raw) -> Optional[str]:
@@ -121,7 +122,7 @@ class MainContractSync(ProgressReporter):
                 return empty
             return df[["date", "symbol", "dominant_contract"]]
         except Exception as e:
-            print(f"      ⚠️ {symbol}: 读取主力合约本地文件失败 - {str(e)[:80]}")
+            logger.warning(f"{symbol}: 读取主力合约本地文件失败 - {str(e)[:80]}")
             return empty
 
     def _save(self, symbol: str, rows: List[Tuple[str, str]]) -> int:
@@ -186,10 +187,10 @@ class MainContractSync(ProgressReporter):
                         seeded[date_compact] = contract
             if seeded:
                 self._save(symbol, list(seeded.items()))
-                print(f"      📚 {symbol}: 从基差数据补种 {len(seeded)} 个交易日的主力合约")
+                logger.debug(f"{symbol}: 从基差数据补种 {len(seeded)} 个交易日的主力合约")
             return seeded
         except Exception as e:
-            print(f"      ⚠️ {symbol}: 从基差数据补种失败 - {str(e)[:80]}")
+            logger.warning(f"{symbol}: 从基差数据补种失败（不影响主流程）- {str(e)[:80]}")
             return {}
 
     def _fetch_online_by_date(self, date_compact: str) -> Dict[str, str]:
@@ -207,10 +208,33 @@ class MainContractSync(ProgressReporter):
                         mapping[symbol] = contract
                 return mapping
             except Exception as e:
-                print(f"      ⚠️ 联网获取 {date_compact} 主力合约第{attempt + 1}次失败: {str(e)[:80]}")
+                # 非交易日、数据源当日未发布等情况属预期，重试期间不记为 ERROR
+                logger.warning(f"联网获取 {date_compact} 主力合约第{attempt + 1}次失败: {str(e)[:80]}")
                 if attempt < 2:
                     time.sleep(random.uniform(1, 3))
         return {}
+
+    # ---------- 动态品种清单 ----------
+
+    def list_known_varieties(self, target_date: Optional[datetime] = None) -> List[str]:
+        """
+        动态获取“已知品种清单”：本地主力合约库优先，库为空时联网取一次全市场主力合约快照。
+
+        品种/主力合约由本模块每日同步落盘维护，各更新器不应再写死品种或合约代码。
+
+        Returns:
+            品种代码列表（大写，已排序）；无法获取时返回空列表。
+        """
+        symbols: set = set()
+        if self.store_dir.exists():
+            symbols = {
+                p.name.upper() for p in self.store_dir.iterdir()
+                if p.is_dir() and (p / "dominant_contract.csv").exists()
+            }
+        if not symbols:
+            date_compact = (target_date or datetime.now()).strftime("%Y%m%d")
+            symbols = {str(s).upper() for s in self._fetch_online_by_date(date_compact)}
+        return sorted(symbols)
 
     # ---------- 对外主入口 ----------
 
@@ -247,7 +271,7 @@ class MainContractSync(ProgressReporter):
                 covered = set(local.keys()) & set(needed_dates)
                 missing_by_symbol[symbol] -= covered
                 if covered:
-                    print(f"      ✅ {symbol}: 本地已有 {len(covered)} 个交易日的主力合约")
+                    logger.debug(f"{symbol}: 本地已有 {len(covered)} 个交易日的主力合约")
 
         # 2) 基差数据补种（可选）
         if use_basis_seed:
@@ -272,7 +296,7 @@ class MainContractSync(ProgressReporter):
             )
             online = self._fetch_online_by_date(date_compact)
             if not online:
-                print(f"      ⚠️ {date_compact}: 联网未获取到主力合约数据")
+                logger.warning(f"{date_compact}: 联网未获取到主力合约数据")
                 continue
             for symbol in symbols:
                 if date_compact not in missing_by_symbol[symbol]:
@@ -282,7 +306,7 @@ class MainContractSync(ProgressReporter):
                     result[symbol][date_compact] = contract
                     missing_by_symbol[symbol].discard(date_compact)
                     self._save(symbol, [(date_compact, contract)])
-            print(f"      🌐 {date_compact}: 联网获取并保存 {sum(1 for s in symbols if s in online)} 个品种的主力合约")
+            logger.debug(f"{date_compact}: 联网获取并保存 {sum(1 for s in symbols if s in online)} 个品种的主力合约")
             time.sleep(random.uniform(0.5, 1.5))
 
         # 汇总
@@ -291,8 +315,9 @@ class MainContractSync(ProgressReporter):
             if result[symbol]:
                 total += len(result[symbol])
             else:
-                print(f"      ❌ {symbol}: 未能确认任何交易日的主力合约")
-        print(f"      ✅ 主力合约确认完成：共 {total} 条（{len([s for s in result if result[s]])} 个品种）")
+                # 冷门/新品种常不被数据源覆盖，属可容忍失败，已在下方汇总统计中体现
+                logger.warning(f"{symbol}: 未能确认任何交易日的主力合约")
+        logger.debug(f"主力合约确认完成：共 {total} 条（{len([s for s in result if result[s]])} 个品种）")
         return {s: v for s, v in result.items() if v}
 
     # ---------- 主力换月复权（技术指标连续化） ----------
@@ -333,14 +358,14 @@ class MainContractSync(ProgressReporter):
         out = df.copy().sort_values(date_col).reset_index(drop=True)
         codes = self._local_map(symbol)
         if not codes:
-            print(f"      [!] {symbol}: 本地主力合约库暂无记录，本次不进行换月复权"
+            logger.debug(f"{symbol}: 本地主力合约库暂无记录，本次不进行换月复权"
                   f"（运行基差/持仓更新后会自动补齐并修正）")
             return out, 0
 
         date_compacts = [_to_compact(v) for v in out[date_col]]
         code_seq = [codes.get(d) for d in date_compacts]
         if not any(code_seq):
-            print(f"      [!] {symbol}: 主力合约记录未覆盖本批数据日期，本次不进行换月复权")
+            logger.debug(f"{symbol}: 主力合约记录未覆盖本批数据日期，本次不进行换月复权")
             return out, 0
 
         # 找出可确认的换月点：前后两个交易日的真实主力合约不同
@@ -390,8 +415,12 @@ if __name__ == "__main__":
     ok = True
     for raw, expected in test_cases:
         got = normalize_contract(raw)
-        flag = "✅" if got == expected else "❌"
-        if got != expected:
+        if got == expected:
+            logger.info(f"用例通过 {raw!r:>12} -> {got!r}")
+        else:
             ok = False
-        print(f"  {flag} {raw!r:>12} -> {got!r}")
-    print("自测通过" if ok else "自测存在失败项")
+            logger.error(f"用例失败 {raw!r:>12} -> {got!r}（期望 {expected!r}）")
+    if ok:
+        logger.info("自测通过")
+    else:
+        logger.error("自测存在失败项")

@@ -32,8 +32,17 @@ if _BACKEND_DIR not in sys.path:
 
 from loguru import logger  # noqa: E402
 
+from core.logging import setup_logging  # noqa: E402
+from core.settings import settings  # noqa: E402
+from core.net import install_default_timeout  # noqa: E402
 from models.analysis import ScheduledConfig  # noqa: E402
 from services.scheduled_service import run_scheduled_cycle_once  # noqa: E402
+
+# 与 FastAPI 服务保持一致的日志格式（控制台 INFO + 文件 DEBUG）
+setup_logging(logs_dir=settings.LOGS_DIR, console_level="INFO", file_level="DEBUG")
+
+# 无人值守场景下更要避免单次 HTTP 请求挂起，统一注入默认超时
+install_default_timeout()
 
 DEFAULT_MODULES = [
     "inventory", "positioning", "term_structure", "technical", "basis", "news",
@@ -111,11 +120,10 @@ def build_config_from_args(argv=None) -> ScheduledConfig:
 
 
 def main() -> int:
-    logger.add(sys.stderr, level="INFO")
     try:
         config = build_config_from_args()
     except SystemExit as e:
-        print(str(e) if str(e) else "", file=sys.stderr)
+        logger.error(str(e) if str(e) else "命令行参数无效")
         return 2
     except Exception as e:
         logger.error(f"配置解析失败: {e}")

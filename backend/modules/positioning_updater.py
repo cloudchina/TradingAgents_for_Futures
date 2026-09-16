@@ -15,14 +15,17 @@ import random
 import json
 import warnings
 from typing import Dict, List, Optional, Tuple
+from loguru import logger
+
 from modules.progress import ProgressReporter
+from modules import variety_catalog
 
 warnings.filterwarnings('ignore')
 
 # 品种名称映射
 SYMBOL_NAMES = {
     'A': '豆一', 'AG': '白银', 'AL': '铝', 'AU': '黄金', 'B': '豆二',
-    'BU': '沥青', 'C': '玉米', 'CF': '棉花', 'CU': '铜', 'CY': '棉纱',
+    'BU': '沥青', 'C': '玉米', 'CF': '棉花', 'CU': '铜', 'EC': '集运指数',
     'EB': '苯乙烯', 'EG': '乙二醇', 'FG': '玻璃', 'FU': '燃油', 'HC': '热卷',
     'I': '铁矿石', 'J': '焦炭', 'JD': '鸡蛋', 'JM': '焦煤', 'L': '聚乙烯',
     'LC': '碳酸锂', 'LH': '生猪', 'LU': '低硫燃料油', 'M': '豆粕', 'MA': '甲醇',
@@ -35,10 +38,32 @@ SYMBOL_NAMES = {
 }
 
 # 大商所品种：新浪"成交持仓"排名接口不覆盖大商所，需走大商所官网/东财镜像排名接口
+# 仅作兜底：优先取 commodities.yaml 的 exchange: DCE（见 _is_dce_symbol）
 DCE_SYMBOLS = {
     "A", "B", "C", "EB", "EG", "I", "J", "JD", "JM",
     "L", "LH", "M", "P", "PG", "PP", "V", "Y",
 }
+
+
+def known_symbols() -> list:
+    """受支持品种清单：commodities.yaml 为主，并集内置字典（覆盖配置中尚未登记的老品种）。"""
+    merged = list(variety_catalog.symbols())
+    merged += [s for s in SYMBOL_NAMES if s not in merged]
+    return merged
+
+
+def _symbol_display(symbol: str) -> str:
+    """展示用中文名：内置映射优先（贴合持仓接口口径），缺失时回退配置中的 name"""
+    name = SYMBOL_NAMES.get(symbol) or variety_catalog.name_map().get(symbol)
+    return name or symbol
+
+
+def _is_dce_symbol(symbol: str) -> bool:
+    """是否大商所品种：先看配置里的 exchange，配置缺失时才用内置集合"""
+    exchange = variety_catalog.exchange_map().get(str(symbol).upper())
+    if exchange:
+        return exchange == "DCE"
+    return str(symbol).upper() in DCE_SYMBOLS
 
 # 东方财富数据中心（大商所每日会员成交持仓排名的第三方镜像，字段与官网一致）。
 # 2025 年起 www.dce.com.cn 全站启用动态 JS 反爬(瑞数)，requests/akshare 直连官网
@@ -97,7 +122,7 @@ class PositioningDataUpdater(ProgressReporter):
             varieties: 现有品种列表
             variety_info: 各品种详细信息
         """
-        print("🔍 检查现有持仓数据状态...")
+        logger.info("检查现有持仓数据状态...")
         
         varieties = []
         variety_info = {}
@@ -106,7 +131,7 @@ class PositioningDataUpdater(ProgressReporter):
             return [], {}
         
         variety_folders = [d for d in self.database_path.iterdir() if d.is_dir()]
-        print(f"📂 发现 {len(variety_folders)} 个品种文件夹")
+        logger.info(f"发现 {len(variety_folders)} 个品种文件夹")
         
         for folder in variety_folders:
             variety = folder.name
@@ -160,15 +185,18 @@ class PositioningDataUpdater(ProgressReporter):
                 variety_info[variety] = {
                     "files": files_info,
                     "total_records": total_records,
-                    "date_range": date_range
+                    "date_range": date_range,
+                    # 修复：此前缺少 latest_date 键，导致 update_to_date 读取 start_date 时
+                    # 恒为 None，每次都退化成“回填最近 7 天”（约 5-6 个交易日的无效抓取）
+                    "latest_date": date_range["latest"],
                 }
                 varieties.append(variety)
                 
                 earliest_str = date_range["earliest"].strftime('%Y-%m-%d') if date_range["earliest"] else "无"
                 latest_str = date_range["latest"].strftime('%Y-%m-%d') if date_range["latest"] else "无"
-                print(f"  {variety}: {total_records} 条记录 ({earliest_str} ~ {latest_str})")
+                logger.info(f"{variety}: {total_records} 条记录 ({earliest_str} ~ {latest_str})")
         
-        print(f"\n📊 总计: {len(varieties)} 个有效品种")
+        logger.info(f"总计: {len(varieties)} 个有效品种")
         return varieties, variety_info
     
     def generate_trading_dates(self, start_date: datetime, end_date: datetime) -> List[str]:
@@ -240,12 +268,12 @@ class PositioningDataUpdater(ProgressReporter):
         Returns:
             按品种分组的持仓数据
         """
-        print(f"    📡 基于主力合约获取持仓数据...")
-        print(f"    📅 数据时间范围: {start_date.strftime('%Y-%m-%d')} ~ {target_date.strftime('%Y-%m-%d')}")
+        logger.debug("基于主力合约获取持仓数据...")
+        logger.debug(f"数据时间范围: {start_date.strftime('%Y-%m-%d')} ~ {target_date.strftime('%Y-%m-%d')}")
         
         # 生成交易日列表
         trading_dates = self.generate_trading_dates(start_date, target_date)
-        print(f"    📅 交易日数量: {len(trading_dates)} 天")
+        logger.debug(f"交易日数量: {len(trading_dates)} 天")
         
         # 持仓数据类型
         position_types = ["成交量", "多单持仓", "空单持仓"]
@@ -256,7 +284,7 @@ class PositioningDataUpdater(ProgressReporter):
         
         for _sf_i, (symbol, contracts_dict) in enumerate(dominant_contracts.items(), 1):
             self._report_progress("新浪成交持仓", _sf_i, len(dominant_contracts), symbol)
-            print(f"\n    🔍 处理品种: {symbol} ({SYMBOL_NAMES.get(symbol, symbol)})")
+            logger.info(f"处理品种: {symbol} ({_symbol_display(symbol)})")
             
             symbol_data = []
             symbol_requests = 0
@@ -267,7 +295,7 @@ class PositioningDataUpdater(ProgressReporter):
                     continue
                 
                 contract = contracts_dict[date_str]
-                print(f"      📅 {date_str[:4]}-{date_str[4:6]}-{date_str[6:8]} | {contract}", end=" ")
+                logger.debug(f"交易日 {date_str[:4]}-{date_str[4:6]}-{date_str[6:8]} | 合约 {contract}")
                 
                 daily_success = 0
                 daily_errors = 0
@@ -311,25 +339,26 @@ class PositioningDataUpdater(ProgressReporter):
 
                     except Exception as e:
                         daily_errors += 1
-                        print(f"❌{position_type[:2]}", end="")
+                        logger.warning(f"{contract} {position_type} 获取失败: {str(e)[:60]}")
                         continue
 
                 if daily_success > 0:
-                    print(f" ✅({daily_success}/3)")
+                    logger.debug(f"{contract} {date_str}: {daily_success}/{len(position_types)} 类持仓获取成功")
                 elif daily_errors > 0:
-                    print(" ❌ 接口异常")
+                    logger.warning(f"{contract} {date_str}: {daily_errors} 类持仓接口异常")
                 else:
-                    print(" ⏳ 数据未发布")
+                    logger.info(f"{contract} {date_str}: 持仓数据未发布")
             
             if symbol_data:
                 all_positioning_data[symbol] = symbol_data
                 success_rate = symbol_success / symbol_requests * 100 if symbol_requests > 0 else 0
-                print(f"      ✅ {symbol}: 获取 {len(symbol_data)} 批数据 (成功率: {success_rate:.1f}%)")
+                logger.debug(f"{symbol}: 获取 {len(symbol_data)} 批数据 (成功率: {success_rate:.1f}%)")
             else:
-                print(f"      ❌ {symbol}: 未获取到任何数据")
+                # 非交易日、交易所未发布当日排名属正常情况
+                logger.warning(f"{symbol}: 该区间未获取到持仓数据（可能未发布）")
         
         overall_success_rate = successful_requests / total_requests * 100 if total_requests > 0 else 0
-        print(f"    📊 总体统计: {successful_requests}/{total_requests} 请求成功 (成功率: {overall_success_rate:.1f}%)")
+        logger.debug(f"总体统计: {successful_requests}/{total_requests} 请求成功 (成功率: {overall_success_rate:.1f}%)")
         
         return all_positioning_data
     
@@ -358,14 +387,15 @@ class PositioningDataUpdater(ProgressReporter):
         Returns:
             {symbol: {YYYYMMDD: contract}}
         """
-        print(f"    📖 确认主力合约（本地优先，缺失联网查询并落盘）...")
+        logger.debug("确认主力合约（本地优先，缺失联网查询并落盘）...")
 
         trading_dates = self.generate_trading_dates(start_date, target_date)
         if not trading_dates:
             return {}
 
         # 只处理配置内存在的品种，避免对无关品种发起联网请求
-        valid_symbols = [s.upper() for s in symbols if s and s.upper() in SYMBOL_NAMES]
+        known = set(known_symbols())
+        valid_symbols = [s.upper() for s in symbols if s and s.upper() in known]
         if not valid_symbols:
             return {}
 
@@ -386,25 +416,31 @@ class PositioningDataUpdater(ProgressReporter):
         Returns:
             {symbol: {date: contract}} 主力合约信息
         """
-        print(f"    📖 从基差数据中提取主力合约信息...")
+        logger.debug("从基差数据中提取主力合约信息...")
         
         # 基差数据目录
         basis_root = self.database_path.parent / "basis"
         
         dominant_contracts = {}
-        
-        for symbol in SYMBOL_NAMES.keys():
-            basis_file = basis_root / symbol / "basis_data.csv"
+
+        # 按基差目录中实际存在的品种遍历（不依赖写死的清单，新增品种自动纳入）
+        if not basis_root.exists():
+            logger.warning(f"基差数据根目录不存在: {basis_root}")
+            return {}
+
+        for var_dir in sorted(p for p in basis_root.iterdir() if p.is_dir()):
+            symbol = var_dir.name.upper()
+            basis_file = var_dir / "basis_data.csv"
             
             if not basis_file.exists():
-                print(f"      ⚠️ {symbol}: 基差数据文件不存在")
+                logger.warning(f"{symbol}: 基差数据文件不存在")
                 continue
             
             try:
                 df = pd.read_csv(basis_file, encoding='utf-8')
                 
                 if 'date' not in df.columns or 'dominant_contract' not in df.columns:
-                    print(f"      ⚠️ {symbol}: 基差数据格式不正确")
+                    logger.warning(f"{symbol}: 基差数据格式不正确")
                     continue
                 
                 # 转换日期格式
@@ -415,7 +451,7 @@ class PositioningDataUpdater(ProgressReporter):
                 filtered_df = df[mask].copy()
                 
                 if len(filtered_df) == 0:
-                    print(f"      ⚠️ {symbol}: 指定时间范围内无基差数据")
+                    logger.warning(f"{symbol}: 指定时间范围内无基差数据")
                     continue
                 
                 # 提取主力合约信息
@@ -440,18 +476,18 @@ class PositioningDataUpdater(ProgressReporter):
                             # 如果数字部分是3位，在前面补2
                             if len(num_part) == 3 and num_part.isdigit():
                                 contract = alpha_part + "2" + num_part
-                                print(f"        🔧 修正合约代码: {row['dominant_contract']} -> {contract}")
+                                logger.debug(f"修正合约代码: {row['dominant_contract']} -> {contract}")
                         
                         contracts_dict[date_str] = contract
                 
                 dominant_contracts[symbol] = contracts_dict
-                print(f"      ✅ {symbol}: 提取了 {len(contracts_dict)} 个交易日的主力合约")
+                logger.debug(f"{symbol}: 提取了 {len(contracts_dict)} 个交易日的主力合约")
                 
             except Exception as e:
-                print(f"      ❌ {symbol}: 处理基差数据失败 - {str(e)[:50]}")
+                logger.error(f"{symbol}: 处理基差数据失败 - {str(e)[:50]}")
                 continue
         
-        print(f"    ✅ 主力合约信息提取完成，共 {len(dominant_contracts)} 个品种")
+        logger.debug(f"主力合约信息提取完成，共 {len(dominant_contracts)} 个品种")
         return dominant_contracts
     
     def _extract_symbol_from_contract(self, contract: str) -> str:
@@ -615,7 +651,7 @@ class PositioningDataUpdater(ProgressReporter):
         Returns:
             大商所持仓数据字典 {合约代码: DataFrame}，与其他交易所格式一致
         """
-        print(f"        🏢 大商所数据获取 (多策略)...")
+        logger.debug("大商所数据获取 (多策略)...")
         
         strategies = [
             {
@@ -646,14 +682,14 @@ class PositioningDataUpdater(ProgressReporter):
         
         for strategy in strategies:
             try:
-                print(f"          🔄 尝试{strategy['name']}...", end="")
+                logger.debug(f"尝试数据源: {strategy['name']}")
                 data = strategy['func'](**strategy['params'])
                 
                 if data and isinstance(data, dict) and len(data) > 0:
-                    print(f" ✅ 成功 ({len(data)}个合约)")
+                    logger.info(f"数据源 {strategy['name']} 获取成功：{len(data)} 个合约")
                     return data
                 else:
-                    print(f" ❌ 无数据")
+                    logger.warning(f"数据源 {strategy['name']} 返回空数据")
                     
             except Exception as e:
                 detail = str(e)
@@ -661,11 +697,11 @@ class PositioningDataUpdater(ProgressReporter):
                 if strategy["name"] != "东财数据中心" and \
                         any(k in detail for k in ("zip", "BadZipFile", "list index", "412")):
                     hint = "（官网疑似动态反爬拦截，仅作官网通道降级尝试）"
-                print(f" ❌ 失败: {detail[:40]}...{hint}")
+                logger.warning(f"数据源 {strategy['name']} 获取失败: {detail[:40]}{hint}")
                 continue
         
         # 如果所有策略都失败，返回空字典
-        print(f"        ⚠️ 大商所数据暂时无法获取")
+        logger.warning("大商所数据暂时无法获取")
         return {}
 
     # ------------------------------------------------------------------ #
@@ -785,7 +821,8 @@ class PositioningDataUpdater(ProgressReporter):
             try:
                 rows = self._query_em_daily_position(date_dash, symbol.upper())
             except Exception as e:
-                print(f"            ⚠️ {symbol}: 东财接口异常 ({str(e)[:60]})")
+                # 单品种异常不影响其余品种，且大商所还有官网通道可降级，故不记 ERROR
+                logger.warning(f"{symbol}: 东财接口异常 ({str(e)[:60]})")
                 continue
             if not rows:
                 continue
@@ -814,7 +851,7 @@ class PositioningDataUpdater(ProgressReporter):
         Returns:
             {symbol: {"long_positions": [], "short_positions": [], "volume_rankings": []}}
         """
-        print(f"    📡 大商所持仓排名获取（{len(symbols)} 个品种）...")
+        logger.debug(f"大商所持仓排名获取（{len(symbols)} 个品种）...")
 
         result: Dict[str, Dict[str, list]] = {}
 
@@ -832,7 +869,7 @@ class PositioningDataUpdater(ProgressReporter):
 
             data = self._fetch_dce_data_with_fallback(date_str, symbols=symbols)
             if not data:
-                print(f"      ⚠️ {date_str[:4]}-{date_str[4:6]}-{date_str[6:8]}: 无数据")
+                logger.warning(f"大商所 {date_str[:4]}-{date_str[4:6]}-{date_str[6:8]}: 未获取到持仓排名数据")
                 continue
 
             # 归一化索引：合约代码(如 jd2611/JD2611) -> DataFrame
@@ -856,7 +893,7 @@ class PositioningDataUpdater(ProgressReporter):
                 hit_symbols.append(symbol)
 
             if hit_symbols:
-                print(f"      ✅ {date_str[:4]}-{date_str[4:6]}-{date_str[6:8]}: "
+                logger.debug(f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]}: "
                       f"{len(hit_symbols)}/{len(needed)} 个品种匹配主力合约")
 
         return result
@@ -911,12 +948,12 @@ class PositioningDataUpdater(ProgressReporter):
                 combined_df.to_csv(file_path, index=False, encoding='utf-8-sig')
                 
                 total_records += len(combined_df)
-                print(f"      💾 {position_type}: {len(combined_df)} 条记录已保存")
+                logger.debug(f"{symbol} {position_type}: {len(combined_df)} 条记录已保存")
             
             # 保存汇总信息
             summary_data = {
                 'symbol': symbol,
-                'symbol_name': SYMBOL_NAMES.get(symbol, symbol),
+                'symbol_name': _symbol_display(symbol),
                 'total_records': total_records,
                 'position_types': position_types,
                 'update_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -929,7 +966,7 @@ class PositioningDataUpdater(ProgressReporter):
             return True, total_records
             
         except Exception as e:
-            print(f"      ❌ 保存失败: {e}")
+            logger.error(f"{symbol}: 保存持仓数据失败 - {str(e)}")
             return False, 0
     
     def save_variety_data(self, symbol: str, new_data: Dict, existing_info: Optional[Dict] = None) -> bool:
@@ -985,7 +1022,7 @@ class PositioningDataUpdater(ProgressReporter):
             summary_file = variety_dir / "positioning_summary.json"
             summary_info = {
                 "symbol": symbol,
-                "symbol_name": SYMBOL_NAMES.get(symbol, symbol),
+                "symbol_name": _symbol_display(symbol),
                 "last_updated": datetime.now().isoformat(),
                 "files": {
                     "long_position_ranking": len(new_data.get("long_positions", [])),
@@ -998,17 +1035,17 @@ class PositioningDataUpdater(ProgressReporter):
                 json.dump(summary_info, f, ensure_ascii=False, indent=2)
             
             if new_records_count > 0:
-                print(f"    ✅ {symbol}: 新增 {new_records_count} 条记录")
+                logger.debug(f"{symbol}: 新增 {new_records_count} 条记录")
                 self.update_stats["updated_varieties"].append(symbol)
                 self.update_stats["total_new_records"] += new_records_count
             else:
-                print(f"    ℹ️ {symbol}: 无新数据")
+                logger.debug(f"{symbol}: 无新数据")
                 self.update_stats["skipped_varieties"].append(symbol)
             
             return True
             
         except Exception as e:
-            print(f"    ❌ {symbol}: 保存失败 - {str(e)}")
+            logger.error(f"{symbol}: 保存失败 - {str(e)}")
             self.update_stats["failed_varieties"].append(symbol)
             self.update_stats["error_messages"].append(f"{symbol}: 保存失败 - {str(e)}")
             return False
@@ -1024,8 +1061,7 @@ class PositioningDataUpdater(ProgressReporter):
         Returns:
             更新结果统计
         """
-        print(f"🚀 持仓数据更新器")
-        print("=" * 60)
+        logger.info("持仓数据更新器")
         
         # 解析目标日期
         try:
@@ -1054,111 +1090,112 @@ class PositioningDataUpdater(ProgressReporter):
                 overall_latest = max(latest_dates)
                 # 从最新日期的下一天开始更新
                 start_date = overall_latest + timedelta(days=1)
-                print(f"📅 检测到最新数据日期: {overall_latest.strftime('%Y-%m-%d')}")
-                print(f"📅 将从 {start_date.strftime('%Y-%m-%d')} 更新到 {target_date.strftime('%Y-%m-%d')}")
+                logger.info(f"检测到最新数据日期: {overall_latest.strftime('%Y-%m-%d')}")
+                logger.info(f"将从 {start_date.strftime('%Y-%m-%d')} 更新到 {target_date.strftime('%Y-%m-%d')}")
                 
                 # 如果已经是最新，则获取最近3天的数据（用于确保数据完整性）
                 if start_date >= target_date:
-                    print(f"📅 数据已是最新，获取最近3天数据以确保完整性")
+                    logger.info("数据已是最新，获取最近3天数据以确保完整性")
                     start_date = target_date - timedelta(days=3)
             else:
                 # 没有日期信息，获取最近7天数据
                 start_date = target_date - timedelta(days=7)
-                print(f"📅 首次更新，将获取最近7天数据")
+                logger.info("首次更新，将获取最近7天数据")
         else:
             # 没有现有数据，获取最近7天数据
             start_date = target_date - timedelta(days=7)
-            print(f"📅 首次更新，将获取最近7天数据")
+            logger.info("首次更新，将获取最近7天数据")
         
-        print(f"📅 更新日期范围: {start_date.strftime('%Y-%m-%d')} ~ {target_date.strftime('%Y-%m-%d')}")
+        logger.info(f"更新日期范围: {start_date.strftime('%Y-%m-%d')} ~ {target_date.strftime('%Y-%m-%d')}")
         
         # 确定要更新的品种
+        known_varieties = known_symbols()
         if specific_varieties:
-            target_symbols = [s for s in specific_varieties if s.upper() in SYMBOL_NAMES]
-            print(f"🎯 指定更新品种: {len(target_symbols)} 个")
+            wanted = [str(s).strip().upper() for s in specific_varieties if str(s).strip()]
+            target_symbols = [s for s in wanted if s in known_varieties]
+            unsupported = [s for s in wanted if s not in known_varieties]
+            if unsupported:
+                logger.warning(f"未知品种 {', '.join(unsupported)}：不在持仓品种表内，已忽略")
+            logger.info(f"指定更新品种: {len(target_symbols)} 个")
         else:
-            target_symbols = list(SYMBOL_NAMES.keys())
-            print(f"🎯 全品种更新: {len(target_symbols)} 个")
+            target_symbols = known_varieties
+            logger.info(f"全品种更新: {len(target_symbols)} 个")
         
         # 生成交易日期
         trading_dates = self.generate_trading_dates(start_date, target_date)
-        print(f"📅 计划处理 {len(trading_dates)} 个交易日")
+        logger.info(f"计划处理 {len(trading_dates)} 个交易日")
         
         # 执行更新 - 基于主力合约获取持仓数据
         processed_count = 0
         
-        print(f"\n🔄 开始基于主力合约获取持仓数据...")
+        logger.info("开始基于主力合约获取持仓数据...")
 
         # 1. 确认主力合约：本地库优先 -> 基差数据补种 -> 联网查询并保存到本地
         dominant_contracts = self.resolve_dominant_contracts(start_date, target_date, target_symbols)
 
         if not dominant_contracts:
-            print("❌ 无法获取主力合约信息，无法更新持仓数据")
+            logger.error("无法获取主力合约信息，无法更新持仓数据")
             self.update_stats["end_time"] = datetime.now()
-            return
+            return self.update_stats
 
-        # 如果指定了品种，只处理指定品种
+        # 如果指定了品种，只处理指定品种（用已归一化的 target_symbols，避免大小写差异导致过滤为空）
         if specific_varieties:
-            filtered_contracts = {}
-            for symbol in specific_varieties:
-                if symbol in dominant_contracts:
-                    filtered_contracts[symbol] = dominant_contracts[symbol]
-            dominant_contracts = filtered_contracts
+            dominant_contracts = {s: dominant_contracts[s] for s in target_symbols if s in dominant_contracts}
 
         if not dominant_contracts:
-            print("❌ 指定的品种都没有主力合约信息")
+            logger.error("指定的品种都没有主力合约信息")
             self.update_stats["end_time"] = datetime.now()
-            return
+            return self.update_stats
         
         # 2. 按交易所分流获取持仓数据：
         #    大商所 -> 东财数据中心/官网排名接口（新浪成交持仓源不覆盖大商所）
         #    其余交易所 -> 新浪成交持仓接口（原有链路）
-        dce_symbols = [s for s in dominant_contracts if s in DCE_SYMBOLS]
-        sina_symbols = [s for s in dominant_contracts if s not in DCE_SYMBOLS]
+        dce_symbols = [s for s in dominant_contracts if _is_dce_symbol(s)]
+        sina_symbols = [s for s in dominant_contracts if not _is_dce_symbol(s)]
 
         dce_positioning_data = {}
         if dce_symbols:
-            print(f"🔄 大商所品种走东财/官网排名接口: {len(dce_symbols)} 个")
+            logger.info(f"大商所品种走东财/官网排名接口: {len(dce_symbols)} 个")
             dce_positioning_data = self._update_dce_varieties(
                 dce_symbols, dominant_contracts, trading_dates
             )
 
         all_positioning_data = {}
         if sina_symbols:
-            print(f"🔄 其余品种走新浪成交持仓接口: {len(sina_symbols)} 个")
+            logger.info(f"其余品种走新浪成交持仓接口: {len(sina_symbols)} 个")
             sina_contracts = {s: dominant_contracts[s] for s in sina_symbols}
             all_positioning_data = self.fetch_positioning_data_by_contracts(
                 sina_contracts, start_date, target_date
             )
 
-        print(f"\n💾 开始保存品种数据...")
+        logger.info("开始保存品种数据...")
 
         # 3. 保存新浪链路数据（DataFrame 列表 -> 分类型 CSV）
         for _sa_i, (symbol, symbol_data) in enumerate(all_positioning_data.items(), 1):
             self._report_progress("保存持仓数据(新浪链路)", _sa_i, max(len(all_positioning_data), 1), symbol)
-            print(f"\n  处理品种: {symbol} ({SYMBOL_NAMES.get(symbol, symbol)})")
+            logger.info(f"处理品种: {symbol} ({_symbol_display(symbol)})")
 
             if symbol_data:
                 success, record_count = self.save_positioning_data(symbol, symbol_data)
                 if success:
                     processed_count += 1
-                    print(f"    ✅ {symbol}: 成功保存 {record_count} 条记录")
+                    logger.debug(f"{symbol}: 成功保存 {record_count} 条记录")
                     self.update_stats["updated_varieties"].append(symbol)
                 else:
-                    print(f"    ❌ {symbol}: 保存失败")
+                    logger.error(f"{symbol}: 保存失败")
                     self.update_stats["failed_varieties"].append(symbol)
             else:
-                print(f"    ❌ {symbol}: 无有效数据")
+                logger.warning(f"{symbol}: 无有效数据（交易所可能未发布当日持仓）")
                 self.update_stats["failed_varieties"].append(symbol)
 
         # 4. 保存大商所链路数据（会员对象列表 -> 分类型 CSV，自动增量合并去重）
         for _dp_i, (symbol, new_data) in enumerate(dce_positioning_data.items(), 1):
             self._report_progress("保存持仓数据(大商所链路)", _dp_i, max(len(dce_positioning_data), 1), symbol)
-            print(f"\n  处理品种: {symbol} ({SYMBOL_NAMES.get(symbol, symbol)})")
+            logger.info(f"处理品种: {symbol} ({_symbol_display(symbol)})")
 
             has_rows = any(new_data.get(k) for k in ("long_positions", "short_positions", "volume_rankings"))
             if not has_rows:
-                print(f"    ❌ {symbol}: 无有效数据")
+                logger.warning(f"{symbol}: 无有效数据（交易所可能未发布当日持仓）")
                 self.update_stats["failed_varieties"].append(symbol)
                 continue
 
@@ -1168,17 +1205,8 @@ class PositioningDataUpdater(ProgressReporter):
         # 完成统计
         self.update_stats["end_time"] = datetime.now()
         
-        print(f"\n📊 更新完成统计:")
-        print(f"  ✅ 成功更新品种: {len(self.update_stats['updated_varieties'])} 个")
-        print(f"  🆕 新增品种: {len(self.update_stats['new_varieties'])} 个")
-        print(f"  ❌ 失败品种: {len(self.update_stats['failed_varieties'])} 个")
-        print(f"  ⏭️ 跳过品种: {len(self.update_stats['skipped_varieties'])} 个")
-        print(f"  📈 新增记录总数: {self.update_stats['total_new_records']} 条")
-        print(f"  ⏱️ 耗时: {(self.update_stats['end_time'] - self.update_stats['start_time']).total_seconds():.1f} 秒")
-        
-        if self.update_stats["failed_varieties"]:
-            print(f"  ⚠️ 失败品种列表: {', '.join(self.update_stats['failed_varieties'])}")
-        
+        self.log_update_summary()
+
         return self.update_stats
     
     def update_data(self, target_date_str: str, specific_varieties: Optional[List[str]] = None) -> Dict:
@@ -1196,19 +1224,17 @@ class PositioningDataUpdater(ProgressReporter):
 
 def main():
     """交互式主函数"""
-    print("=" * 80)
-    print("🎯 持仓席位数据更新器")
-    print("=" * 80)
+    logger.info("持仓席位数据更新器")
     
     updater = PositioningDataUpdater()
     
     # 获取现有数据状态
-    print("\n🔍 正在检查现有数据状态...")
+    logger.info("正在检查现有数据状态...")
     varieties, info = updater.get_existing_data_status()
     
-    print(f"\n📦 已有品种数量: {len(varieties)} 个")
+    logger.info(f"已有品种数量: {len(varieties)} 个")
     if varieties:
-        print(f"   品种列表: {', '.join(sorted(varieties)[:20])}{'...' if len(varieties) > 20 else ''}")
+        logger.info(f"品种列表: {', '.join(sorted(varieties)[:20])}{'...' if len(varieties) > 20 else ''}")
         
         # 显示最新日期
         if info:
@@ -1218,14 +1244,12 @@ def main():
                     latest_dates.append(v_info['latest_date'])
             if latest_dates:
                 overall_latest = max(latest_dates)
-                print(f"📅 当前最新数据日期: {overall_latest.strftime('%Y-%m-%d')}")
+                logger.info(f"当前最新数据日期: {overall_latest.strftime('%Y-%m-%d')}")
     else:
-        print("📅 当前暂无数据")
+        logger.warning("当前暂无数据")
     
     # 用户输入更新参数
-    print("\n" + "=" * 80)
-    print("请输入更新参数:")
-    print("-" * 80)
+    logger.info("请输入更新参数:")
     
     # 输入目标日期
     default_date = datetime.now().strftime('%Y-%m-%d')
@@ -1236,7 +1260,7 @@ def main():
     try:
         datetime.strptime(target_date, '%Y-%m-%d')
     except ValueError:
-        print(f"❌ 日期格式错误，使用默认日期: {default_date}")
+        logger.error(f"日期格式错误，使用默认日期: {default_date}")
         target_date = default_date
     
     # 输入品种
@@ -1244,31 +1268,27 @@ def main():
     
     if varieties_input:
         specific_varieties = [v.strip().upper() for v in varieties_input.split(',')]
-        print(f"\n✅ 将更新指定品种: {', '.join(specific_varieties)}")
+        logger.info(f"将更新指定品种: {', '.join(specific_varieties)}")
     else:
         specific_varieties = None
-        print(f"\n✅ 将更新所有品种")
+        logger.info("将更新所有品种")
     
     # 确认
-    print("\n" + "=" * 80)
-    print(f"📋 更新配置:")
-    print(f"   目标日期: {target_date}")
-    print(f"   更新品种: {'全部' if not specific_varieties else ', '.join(specific_varieties)}")
-    print(f"   更新模式: 智能增量更新（自动从最新数据补全到目标日期）")
-    print("=" * 80)
+    logger.info("更新配置:")
+    logger.info(f"目标日期: {target_date}")
+    logger.info(f"更新品种: {'全部' if not specific_varieties else ', '.join(specific_varieties)}")
+    logger.info("更新模式: 智能增量更新（自动从最新数据补全到目标日期）")
     
     confirm = input("\n确认开始更新？(y/N): ").strip().lower()
     if confirm != 'y':
-        print("❌ 已取消更新")
+        logger.error("已取消更新")
         return
     
     # 执行更新
-    print("\n🚀 开始更新...")
+    logger.info("开始更新...")
     result = updater.update_to_date(target_date, specific_varieties=specific_varieties)
     
-    print(f"\n" + "=" * 80)
-    print("🎯 更新完成!")
-    print("=" * 80)
+    logger.info("更新完成!")
 
 if __name__ == "__main__":
     main()

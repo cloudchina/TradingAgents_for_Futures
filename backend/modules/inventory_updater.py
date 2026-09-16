@@ -14,19 +14,22 @@ import random
 import json
 from typing import Dict, List, Optional, Tuple
 from modules.progress import ProgressReporter
+from modules import variety_catalog
+from loguru import logger
 
 # 品种映射配置
 SYMBOL_MAPPING = {
     'A': '豆一', 'AG': '沪银', 'AL': '沪铝', 'AO': '氧化铝', 'AP': '苹果',
     'AU': '沪金', 'B': '豆二', 'BR': '丁二烯橡胶', 'BU': '沥青', 'C': '玉米',
-    'CF': '郑棉', 'CJ': '红枣', 'CS': '玉米淀粉', 'CU': '沪铜', 'CY': '棉纱',
+    'CF': '郑棉', 'CJ': '红枣', 'CS': '玉米淀粉', 'CU': '沪铜', 'EC': '集运指数',
     'EB': '苯乙烯', 'EG': '乙二醇', 'FG': '玻璃', 'FU': '燃油', 'HC': '热卷',
     'I': '铁矿石', 'J': '焦炭', 'JD': '鸡蛋', 'JM': '焦煤', 'L': '塑料',
-    'LC': '碳酸锂', 'LG': '原木', 'LH': '生猪', 'LU': '低硫燃料油', 'M': '豆粕',
+    # 注：LG(原木)、RS(菜籽) 成交清淡，不纳入更新范围
+    'LC': '碳酸锂', 'LH': '生猪', 'LU': '低硫燃料油', 'M': '豆粕',
     'MA': '甲醇', 'NI': '镍', 'NR': '20号胶', 'OI': '菜油', 'P': '棕榈',
     'PB': '沪铅', 'PF': '短纤', 'PG': '液化石油气', 'PK': '花生', 'PP': '聚丙烯',
-    'PR': '瓶片', 'PS': '多晶硅', 'PTA': 'PTA', 'PX': '对二甲苯', 'RB': '螺纹钢',
-    'RM': '菜粕', 'RS': '菜籽', 'RU': '橡胶', 'SA': '纯碱', 'SF': '硅铁',
+    'PR': '瓶片', 'PS': '多晶硅', 'PX': '对二甲苯', 'RB': '螺纹钢',
+    'RM': '菜粕', 'RU': '橡胶', 'SA': '纯碱', 'SF': '硅铁',
     'SH': '烧碱', 'SI': '工业硅', 'SM': '锰硅', 'SN': '锡', 'SP': '纸浆',
     'SR': '白糖', 'SS': '不锈钢', 'TA': 'PTA', 'UR': '尿素', 'V': 'PVC',
     'Y': '豆油', 'ZN': '沪锌',
@@ -68,7 +71,7 @@ class InventoryDataUpdater(ProgressReporter):
             varieties: 现有品种列表
             variety_info: 各品种详细信息
         """
-        print("🔍 检查现有库存数据状态...")
+        logger.info("检查现有库存数据状态...")
         
         varieties = []
         variety_info = {}
@@ -77,7 +80,7 @@ class InventoryDataUpdater(ProgressReporter):
             return [], {}
         
         variety_folders = [d for d in self.base_dir.iterdir() if d.is_dir()]
-        print(f"📂 发现 {len(variety_folders)} 个品种文件夹")
+        logger.info(f"发现 {len(variety_folders)} 个品种文件夹")
         
         for folder in variety_folders:
             variety = folder.name
@@ -100,13 +103,13 @@ class InventoryDataUpdater(ProgressReporter):
                         }
                         
                         varieties.append(variety)
-                        print(f"  {variety}: {record_count} 条记录 ({variety_earliest.strftime('%Y-%m-%d')} ~ {variety_latest.strftime('%Y-%m-%d')})")
+                        logger.info(f"{variety}: {record_count} 条记录 ({variety_earliest.strftime('%Y-%m-%d')} ~ {variety_latest.strftime('%Y-%m-%d')})")
                         
                 except Exception as e:
-                    print(f"  ❌ {variety}: 读取失败 - {str(e)[:50]}")
+                    logger.warning(f"{variety}: 读取失败 - {str(e)[:50]}")
                     self.update_stats["error_messages"].append(f"{variety}: 数据读取失败 - {str(e)}")
         
-        print(f"\n📊 总计: {len(varieties)} 个有效品种")
+        logger.info(f"总计: {len(varieties)} 个有效品种")
         return varieties, variety_info
     
     def fetch_variety_data(self, symbol: str, series_cn: str, target_date: datetime, retries: int = 3) -> Optional[pd.DataFrame]:
@@ -122,7 +125,7 @@ class InventoryDataUpdater(ProgressReporter):
         Returns:
             数据DataFrame或None
         """
-        print(f"  📡 获取 {symbol} ({series_cn}) 的库存数据...")
+        logger.info(f"获取 {symbol} ({series_cn}) 的库存数据...")
         
         for attempt in range(retries):
             try:
@@ -130,7 +133,7 @@ class InventoryDataUpdater(ProgressReporter):
                 raw_df = ak.futures_inventory_em(symbol=series_cn)
                 
                 if raw_df is None or raw_df.empty:
-                    print(f"    ❌ 第{attempt+1}次尝试: 无数据返回")
+                    logger.warning(f"{symbol}: 第{attempt+1}次尝试无数据返回")
                     if attempt < retries - 1:
                         time.sleep(random.uniform(1, 3))
                     continue
@@ -150,21 +153,22 @@ class InventoryDataUpdater(ProgressReporter):
                 new_df = new_df[new_df['date'] <= target_date]
                 
                 if new_df.empty:
-                    print(f"    ⚠️ 截止日期前无有效数据")
+                    logger.warning(f"{symbol}: 截止日期前无有效数据")
                     return None
                 
                 new_start = new_df['date'].min().strftime('%Y-%m-%d')
                 new_end = new_df['date'].max().strftime('%Y-%m-%d')
-                print(f"    ✅ 获取到 {len(new_df)} 条记录 ({new_start} ~ {new_end})")
+                logger.debug(f"{symbol}: 获取到 {len(new_df)} 条记录 ({new_start} ~ {new_end})")
                 
                 return new_df
                 
             except Exception as e:
-                print(f"    ❌ 第{attempt+1}次尝试失败: {str(e)[:50]}")
+                logger.warning(f"{symbol}: 第{attempt+1}次尝试失败 - {str(e)[:50]}")
                 if attempt < retries - 1:
                     time.sleep(random.uniform(1, 3))
         
-        print(f"    ❌ 所有尝试失败")
+        # 东财库存接口并不覆盖全部品种（如 SC/BC 等），属可容忍失败，不计 ERROR
+        logger.warning(f"{symbol} ({series_cn}): 库存数据获取失败（接口可能不覆盖该品种）")
         return None
     
     def save_variety_data(self, symbol: str, new_data: pd.DataFrame, existing_info: Optional[Dict] = None) -> bool:
@@ -203,20 +207,20 @@ class InventoryDataUpdater(ProgressReporter):
                     combined_df["change"] = combined_df["value"].diff().fillna(0)
                     
                     latest_added = max(added_dates).strftime('%Y-%m-%d')
-                    print(f"    ✅ {symbol}: 新增 {len(added_dates)} 条记录 (至 {latest_added})")
+                    logger.debug(f"{symbol}: 新增 {len(added_dates)} 条记录 (至 {latest_added})")
                     self.update_stats["updated_varieties"].append(symbol)
                     self.update_stats["total_new_records"] += len(added_dates)
                 else:
                     # 无新数据
                     combined_df = existing_df
-                    print(f"    ℹ️ {symbol}: 无新数据")
+                    logger.debug(f"{symbol}: 无新数据")
                     self.update_stats["skipped_varieties"].append(symbol)
                     return True
             else:
                 # 新品种或无现有数据
                 combined_df = new_data
                 data_span = f"{new_data['date'].min().strftime('%Y-%m-%d')} ~ {new_data['date'].max().strftime('%Y-%m-%d')}"
-                print(f"    ✅ {symbol}: 创建 {len(new_data)} 条记录 ({data_span})")
+                logger.debug(f"{symbol}: 创建 {len(new_data)} 条记录 ({data_span})")
                 self.update_stats["new_varieties"].append(symbol)
                 self.update_stats["total_new_records"] += len(new_data)
             
@@ -225,7 +229,7 @@ class InventoryDataUpdater(ProgressReporter):
             return True
             
         except Exception as e:
-            print(f"    ❌ {symbol}: 保存失败 - {str(e)}")
+            logger.error(f"{symbol}: 保存失败 - {str(e)}")
             self.update_stats["failed_varieties"].append(symbol)
             self.update_stats["error_messages"].append(f"{symbol}: 保存失败 - {str(e)}")
             return False
@@ -241,8 +245,7 @@ class InventoryDataUpdater(ProgressReporter):
         Returns:
             更新结果统计
         """
-        print(f"🚀 库存数据更新器")
-        print("=" * 60)
+        logger.info("库存数据更新器")
         
         # 解析目标日期
         try:
@@ -256,20 +259,22 @@ class InventoryDataUpdater(ProgressReporter):
         self.update_stats["start_time"] = datetime.now()
         self.update_stats["target_date"] = target_date_str
         
-        print(f"📅 目标更新日期: {target_date.strftime('%Y-%m-%d')}")
-        print(f"⚠️ 注意: 库存数据接口无法选择日期范围，会获取完整历史数据然后过滤")
+        logger.info(f"目标更新日期: {target_date.strftime('%Y-%m-%d')}")
+        logger.warning("注意: 库存数据接口无法选择日期范围，会获取完整历史数据然后过滤")
         
         # 获取现有数据状态
         existing_varieties, variety_info = self.get_existing_data_status()
         
-        # 确定要更新的品种
+        # 确定要更新的品种：范围取自 commodities.yaml，内置字典只提供东财库存接口用的中文系列名
+        cfg_names = variety_catalog.name_map()
         if specific_varieties:
             target_symbols = []
             unmapped = []
             for s in specific_varieties:
                 key = str(s).upper()
-                if key in SYMBOL_MAPPING:
-                    target_symbols.append((key, SYMBOL_MAPPING[key]))
+                series_cn = SYMBOL_MAPPING.get(key) or cfg_names.get(key)
+                if series_cn:
+                    target_symbols.append((key, series_cn))
                 else:
                     unmapped.append(key)
             # 🔧 修复：未配置映射的品种不再静默过滤——写入失败列表并提示，
@@ -279,24 +284,31 @@ class InventoryDataUpdater(ProgressReporter):
                 for k in unmapped:
                     msg = f"{k}: 未配置东财库存映射(SYMBOL_MAPPING)，无法更新"
                     self.update_stats["error_messages"].append(msg)
-                print(f"  ⚠️ 缺少库存映射的品种(已计入失败): {', '.join(unmapped)}")
-            print(f"🎯 指定更新品种: {len(target_symbols)} 个" + (f"（另有 {len(unmapped)} 个无映射）" if unmapped else ""))
+                logger.error(f"缺少库存映射的品种(已计入失败): {', '.join(unmapped)}")
+            logger.info(
+                f"指定更新品种: {len(target_symbols)} 个"
+                + (f"（另有 {len(unmapped)} 个无映射）" if unmapped else "")
+            )
         else:
-            target_symbols = list(SYMBOL_MAPPING.items())
-            print(f"🎯 全品种更新: {len(target_symbols)} 个")
+            # 并集：commodities.yaml 为主，内置字典补充配置中尚未登记的老品种
+            cfg_symbols = variety_catalog.symbols()
+            wanted = cfg_symbols + [s for s in SYMBOL_MAPPING if s not in cfg_symbols]
+            target_symbols = [(s, SYMBOL_MAPPING.get(s) or cfg_names.get(s) or s) for s in wanted]
+            logger.info(f"全品种更新: {len(target_symbols)} 个")
         
         # 执行更新
         processed_count = 0
         
         for i, (symbol, series_cn) in enumerate(target_symbols):
             self._report_progress("处理品种(东财库存)", i + 1, len(target_symbols), symbol)
-            print(f"\n[{i+1}/{len(target_symbols)}] 处理品种: {symbol} ({series_cn})")
+            logger.info(f"[{i+1}/{len(target_symbols)}] 处理品种: {symbol} ({series_cn})")
             
             # 获取品种数据
             new_data = self.fetch_variety_data(symbol, series_cn, target_date)
             
             if new_data is None or new_data.empty:
-                print(f"  ❌ 跳过 {symbol}: 数据获取失败")
+                # 失败原因已在 fetch_variety_data 内记录，此处只归集，避免重复告警
+                logger.warning(f"跳过 {symbol}: 本次无库存数据，已计入失败")
                 self.update_stats["failed_varieties"].append(symbol)
                 continue
             
@@ -313,17 +325,8 @@ class InventoryDataUpdater(ProgressReporter):
         # 完成统计
         self.update_stats["end_time"] = datetime.now()
         
-        print(f"\n📊 更新完成统计:")
-        print(f"  ✅ 成功更新品种: {len(self.update_stats['updated_varieties'])} 个")
-        print(f"  🆕 新增品种: {len(self.update_stats['new_varieties'])} 个")
-        print(f"  ❌ 失败品种: {len(self.update_stats['failed_varieties'])} 个")
-        print(f"  ⏭️ 跳过品种: {len(self.update_stats['skipped_varieties'])} 个")
-        print(f"  📈 新增记录总数: {self.update_stats['total_new_records']} 条")
-        print(f"  ⏱️ 耗时: {(self.update_stats['end_time'] - self.update_stats['start_time']).total_seconds():.1f} 秒")
-        
-        if self.update_stats["failed_varieties"]:
-            print(f"  ⚠️ 失败品种列表: {', '.join(self.update_stats['failed_varieties'])}")
-        
+        self.log_update_summary()
+
         return self.update_stats
     
     def update_data(self, target_date_str: str, specific_varieties: Optional[List[str]] = None) -> Dict:
@@ -341,19 +344,17 @@ class InventoryDataUpdater(ProgressReporter):
 
 def main():
     """交互式主函数"""
-    print("=" * 80)
-    print("📦 库存数据更新器")
-    print("=" * 80)
+    logger.info("库存数据更新器")
     
     updater = InventoryDataUpdater()
     
     # 获取现有数据状态
-    print("\n🔍 正在检查现有数据状态...")
+    logger.info("正在检查现有数据状态...")
     varieties, info = updater.get_existing_data_status()
     
-    print(f"\n📦 已有品种数量: {len(varieties)} 个")
+    logger.info(f"已有品种数量: {len(varieties)} 个")
     if varieties:
-        print(f"   品种列表: {', '.join(sorted(varieties)[:20])}{'...' if len(varieties) > 20 else ''}")
+        logger.info(f"品种列表: {', '.join(sorted(varieties)[:20])}{'...' if len(varieties) > 20 else ''}")
         
         # 显示最新日期
         if info:
@@ -363,14 +364,12 @@ def main():
                     latest_dates[v] = v_info['latest_date']
             if latest_dates:
                 overall_latest = max(latest_dates.values())
-                print(f"📅 当前最新数据日期: {overall_latest.strftime('%Y-%m-%d')}")
+                logger.info(f"当前最新数据日期: {overall_latest.strftime('%Y-%m-%d')}")
     else:
-        print("📅 当前暂无数据")
+        logger.warning("当前暂无数据")
     
     # 用户输入更新参数
-    print("\n" + "=" * 80)
-    print("请输入更新参数:")
-    print("-" * 80)
+    logger.info("请输入更新参数:")
     
     # 输入目标日期
     default_date = datetime.now().strftime('%Y-%m-%d')
@@ -381,7 +380,7 @@ def main():
     try:
         datetime.strptime(target_date, '%Y-%m-%d')
     except ValueError:
-        print(f"❌ 日期格式错误，使用默认日期: {default_date}")
+        logger.error(f"日期格式错误，使用默认日期: {default_date}")
         target_date = default_date
     
     # 输入品种
@@ -389,31 +388,27 @@ def main():
     
     if varieties_input:
         specific_varieties = [v.strip().upper() for v in varieties_input.split(',')]
-        print(f"\n✅ 将更新指定品种: {', '.join(specific_varieties)}")
+        logger.info(f"将更新指定品种: {', '.join(specific_varieties)}")
     else:
         specific_varieties = None
-        print(f"\n✅ 将更新所有品种")
+        logger.info("将更新所有品种")
     
     # 确认
-    print("\n" + "=" * 80)
-    print(f"📋 更新配置:")
-    print(f"   目标日期: {target_date}")
-    print(f"   更新品种: {'全部' if not specific_varieties else ', '.join(specific_varieties)}")
-    print(f"   更新模式: 智能增量更新（只更新缺失的数据）")
-    print("=" * 80)
+    logger.info("更新配置:")
+    logger.info(f"目标日期: {target_date}")
+    logger.info(f"更新品种: {'全部' if not specific_varieties else ', '.join(specific_varieties)}")
+    logger.info("更新模式: 智能增量更新（只更新缺失的数据）")
     
     confirm = input("\n确认开始更新？(y/N): ").strip().lower()
     if confirm != 'y':
-        print("❌ 已取消更新")
+        logger.error("已取消更新")
         return
     
     # 执行更新
-    print("\n🚀 开始更新...")
+    logger.info("开始更新...")
     result = updater.update_to_date(target_date, specific_varieties)
     
-    print(f"\n" + "=" * 80)
-    print("🎯 更新完成!")
-    print("=" * 80)
+    logger.info("更新完成!")
 
 if __name__ == "__main__":
     main()
