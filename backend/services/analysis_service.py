@@ -17,7 +17,14 @@ from models.analysis import (
     AnalysisRequest, AnalysisTask, AnalysisProgress,
     AnalysisStatus, AnalysisMode, CacheMeta
 )
+# 【三评 / 阶段1】记忆体系：写 episode + 三评字段映射
+from models.memory import (
+    Episode, EpisodeStatus, Direction, ConfidenceLevel,
+    DIRECTION_TO_VIEW, VIEW_TO_DIRECTION, confidence_to_level,
+)
 from services.cache_service import cache_service
+from services.commodity_service import commodity_service
+from services.memory_service import memory_service
 from agents.debate.orchestrator import DebateOrchestrator
 from agents.react_agent import ReActAgent
 from agents.tools.tool_specs import ALL_TOOLS
@@ -227,7 +234,110 @@ class AnalysisManager:
                 logger.error(f"决策流程失败: {e}")
                 result["executive_decision"] = {"status": "failed", "error": str(e)}
 
+        # 【三评 / 阶段1】分析完成后同步写入一条 episode（含三评字段映射）
+        # - analyst_only 模式不写 episode（无 final_decision/directional_confidence 可落库）
+        # - 解析失败写 status=parse_failed，不入 STM 注入、不入校准分母
+        try:
+            self._write_episode(commodity, task, result)
+        except Exception as e:
+            # 记忆写入失败不阻塞主流程
+            logger.error(f"[memory] 写 episode 失败 {commodity}: {e}")
+
         return result
+
+    def _write_episode(self, commodity: str, task: AnalysisTask, result: Dict[str, Any]) -> None:
+        """【三评 / 阶段1】把本次分析结论落库为一条 episode。
+
+        字段映射（中英文翻译 + 数值翻译成中文，见 memory-system-plan.md 三.1）：
+        - direction（判据） ← executive_decision["final_decision"]（long/short/neutral）
+        - direction_view（展示） ← executive_decision["directional_view"]（看多/看空/中性）
+        - confidence（判据） ← executive_decision["directional_confidence"]（0.0~1.0）
+        - confidence_level（展示） ← executive_decision["confidence_level"]（高/中/低）
+
+        parse_failed 判据：executive_decision 缺 final_decision 或 directional_confidence，
+        或 ReActAgent 返回 {"raw": ...} 兜底。
+        """
+        # 阶段1：analyst_only 模式不写 episode
+        if task.analysis_mode != AnalysisMode.COMPLETE_FLOW.value:
+            return
+
+        exec_decision = result.get("executive_decision") or {}
+        run_id = f"{task.task_id}_{commodity}"
+
+        # 取判据字段；缺失或 {"raw": ...} 兜底 → parse_failed
+        final_decision = exec_decision.get("final_decision")
+        directional_confidence = exec_decision.get("directional_confidence")
+
+        # ReActAgent._safe_json_parse 兜底返回 {"raw": text}；缺判据字段视为 parse_failed
+        is_parse_failed = (
+            "raw" in exec_decision
+            or final_decision is None
+            or directional_confidence is None
+        )
+
+        if is_parse_failed:
+            episode = Episode(
+                symbol=commodity,
+                analysis_date=task.analysis_date,
+                run_id=run_id,
+                direction="",
+                direction_view="",
+                confidence=0.0,
+                confidence_level="",
+                summary=str(exec_decision.get("raw", ""))[:500],
+                decision=exec_decision,
+                horizon=10,
+                status=EpisodeStatus.PARSE_FAILED.value,
+                is_canonical=True,
+            )
+            memory_service.write_episode(episode)
+            logger.warning(
+                f"[memory] {commodity} executive_decision 缺判据字段，"
+                f"写 status=parse_failed（不入校准分母）"
+            )
+            return
+
+        # 正常写入：英文方向归一化 + 中文展示对齐
+        try:
+            direction_enum = Direction(final_decision)
+        except ValueError:
+            # agent 偶发输出"long "或"LONG"等大小写/空白异常
+            cleaned = str(final_decision).strip().lower()
+            direction_enum = Direction(cleaned) if cleaned in (
+                Direction.LONG.value, Direction.SHORT.value, Direction.NEUTRAL.value
+            ) else Direction.NEUTRAL
+
+        direction_view = exec_decision.get("directional_view") or DIRECTION_TO_VIEW[direction_enum]
+        confidence = float(directional_confidence)
+        confidence_level = exec_decision.get("confidence_level") or confidence_to_level(confidence).value
+
+        # contract：审计字段，取自 commodity_service；缺失为 None
+        try:
+            contract = commodity_service.get_dominant_contract(commodity) or None
+        except Exception:
+            contract = None
+
+        episode = Episode(
+            symbol=commodity,
+            analysis_date=task.analysis_date,
+            run_id=run_id,
+            direction=direction_enum.value,
+            direction_view=direction_view,
+            confidence=confidence,
+            confidence_level=confidence_level,
+            contract=contract,
+            summary=str(exec_decision.get("reasoning", ""))[:500],
+            key_evidence=[],
+            decision=exec_decision,
+            horizon=10,
+            status=EpisodeStatus.PENDING.value,
+            is_canonical=True,
+        )
+        episode_id = memory_service.write_episode(episode)
+        logger.info(
+            f"[memory] {commodity} {task.analysis_date} episode 写入 id={episode_id} "
+            f"dir={direction_enum.value} conf={confidence:.2f}"
+        )
 
     def _run_module_analysis(self, commodity: str, module_name: str, task: AnalysisTask) -> Dict[str, Any]:
         """运行单个模块分析 - 只读 CSV 元信息（不调 LLM）。

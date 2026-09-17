@@ -14,3 +14,6 @@ aiofiles==24.1.0
 httpx==0.28.1
 akshare>=1.14.0
 openai>=1.50.0
+# 【三评 / 阶段1】测试依赖（CI 硬门禁，对应 memory-system-plan.md 第十章）
+pytest>=8.0.0
+

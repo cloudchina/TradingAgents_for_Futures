@@ -41,6 +41,9 @@ class Settings(BaseSettings):
     RESULTS_DIR: str = Field(default="/app/data/qihuo/trading_agents_results", description="结果目录")
     LOGS_DIR: str = Field(default="/app/data/logs", description="日志目录")
     CACHE_DIR: str = Field(default="/app/data/qihuo/cache/analysis", description="缓存目录")
+    # 【三评 / 阶段1】记忆库目录；留空则运行时 fallback 到 <DATA_ROOT_DIR>/../memory
+    # 本地开发时必须在 backend/.env 改写为本地路径，否则 Windows 会把 /app/data/... 解析为 C:\app\data\...
+    MEMORY_DIR: str = Field(default="", description="记忆库目录；空=fallback 到 <DATA_ROOT_DIR>/../memory")
 
     # 系统配置
     DEFAULT_DAYS_BACK: int = Field(default=3, description="默认回溯天数")
@@ -68,3 +71,19 @@ def get_results_path(*parts: str) -> Path:
 def get_cache_path(*parts: str) -> Path:
     """获取缓存目录下的路径"""
     return Path(settings.CACHE_DIR) / Path(*parts)
+
+
+def get_memory_dir() -> Path:
+    """【三评 / 阶段1】获取记忆库目录。
+
+    优先用 settings.MEMORY_DIR；为空时 fallback 到 <DATA_ROOT_DIR>/../memory
+    （即 Docker 内 /app/data/qihuo/memory，落在 futures-data 命名卷内）。
+    """
+    if settings.MEMORY_DIR:
+        return Path(settings.MEMORY_DIR)
+    return Path(settings.DATA_ROOT_DIR).parent / "memory"
+
+
+def get_memory_path(*parts: str) -> Path:
+    """获取记忆库目录下的路径"""
+    return get_memory_dir() / Path(*parts)

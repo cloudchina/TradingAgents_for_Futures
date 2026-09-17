@@ -27,7 +27,7 @@ from fastapi import FastAPI  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from core.llm_config import llm_config  # noqa: E402
 from core.net import install_default_timeout  # noqa: E402
-from routers import analysis, data, llm, scheduled, system  # noqa: E402
+from routers import analysis, data, llm, memory, scheduled, system  # noqa: E402
 
 
 @asynccontextmanager
@@ -46,6 +46,17 @@ async def lifespan(app: FastAPI):
     # 确保目录存在
     for d in [settings.DATA_ROOT_DIR, settings.CACHE_DIR, settings.LOGS_DIR, settings.RESULTS_DIR]:
         Path(d).mkdir(parents=True, exist_ok=True)
+
+    # 【三评 / 阶段1】记忆库初始化：建目录 + schema migrate
+    # 失败不阻塞启动，routers/memory.py 仍可被调用并按需重试
+    try:
+        from services.memory_service import memory_service
+        from core.settings import get_memory_dir
+        Path(get_memory_dir()).mkdir(parents=True, exist_ok=True)
+        memory_service.init_if_needed()
+        logger.info(f"  记忆库已初始化: {memory_service._resolve_db_path()}")
+    except Exception as e:
+        logger.error(f"  记忆库初始化失败（不阻塞启动）: {e}")
 
     yield
 
@@ -74,6 +85,7 @@ app.include_router(data.router)
 app.include_router(analysis.router)
 app.include_router(scheduled.router)
 app.include_router(llm.router)
+app.include_router(memory.router)
 
 
 @app.get("/")
