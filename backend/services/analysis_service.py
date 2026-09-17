@@ -25,9 +25,11 @@ from models.memory import (
 from services.cache_service import cache_service
 from services.commodity_service import commodity_service
 from services.memory_service import memory_service
+from services.memory_builder import MemoryContext, memory_builder
 from agents.debate.orchestrator import DebateOrchestrator
 from agents.react_agent import ReActAgent
 from agents.tools.tool_specs import ALL_TOOLS
+from agents.tools.memory_tools import MEMORY_TOOL_MAP, reset_run_context, set_run_context
 from agents.tools.data_reader import read_module_data, MODULE_NAME_MAP, _resolve_path
 from agents.tools.news_tool import search_news_data
 from agents.prompts.system_prompts import (
@@ -106,6 +108,8 @@ class AnalysisManager:
                 "use_realtime": request.use_realtime,
                 "debate_rounds": request.debate_rounds,
                 "force_refresh": request.force_refresh,
+                # 【阶段3】记忆开关，前端可关，便于 A/B 评测
+                "use_memory": request.use_memory,
             },
             task_type=task_type,
         )
@@ -221,31 +225,81 @@ class AnalysisManager:
                     "error": str(e),
                 }
 
-        # 完整流程模式：执行辩论、交易员、风控、决策
-        if task.analysis_mode == "complete_flow":
-            try:
-                result["debate"] = self._run_debate(commodity, result["modules"], task)
-                result["trader"] = self._run_trader(commodity, result["modules"], result["debate"], task)
-                result["risk_management"] = self._run_risk_management(commodity, result["trader"], task)
-                result["executive_decision"] = self._run_executive_decision(
-                    commodity, result["trader"], result["risk_management"], task
-                )
-            except Exception as e:
-                logger.error(f"决策流程失败: {e}")
-                result["executive_decision"] = {"status": "failed", "error": str(e)}
+        # 【阶段3】构建记忆上下文（use_memory=False 时整段跳过，便于 A/B 评测）
+        mem_ctx: Optional["MemoryContext"] = self._build_memory_context(commodity, task)
+        if mem_ctx is not None:
+            result["memory_context"] = {
+                "has_prior": mem_ctx.has_prior,
+                "token_count": mem_ctx.token_count,
+                "injected_episode_ids": mem_ctx.injected_episode_ids,
+                "injected_semantic_ids": mem_ctx.injected_semantic_ids,
+            }
+        mem_text = mem_ctx.to_prompt() if mem_ctx else ""
 
-        # 【三评 / 阶段1】分析完成后同步写入一条 episode（含三评字段映射）
-        # - analyst_only 模式不写 episode（无 final_decision/directional_confidence 可落库）
-        # - 解析失败写 status=parse_failed，不入 STM 注入、不入校准分母
+        # 完整流程模式：执行辩论、交易员、风控、决策
         try:
-            self._write_episode(commodity, task, result)
-        except Exception as e:
-            # 记忆写入失败不阻塞主流程
-            logger.error(f"[memory] 写 episode 失败 {commodity}: {e}")
+            if task.analysis_mode == "complete_flow":
+                result["debate"] = self._run_debate(commodity, result["modules"], task, mem_text)
+                result["trader"] = self._run_trader(
+                    commodity, result["modules"], result["debate"], task, mem_text
+                )
+                result["risk_management"] = self._run_risk_management(
+                    commodity, result["trader"], task, mem_text
+                )
+                result["executive_decision"] = self._run_executive_decision(
+                    commodity, result["trader"], result["risk_management"], task, mem_text
+                )
+
+            # 【三评 / 阶段1】分析完成后同步写入一条 episode（含三评字段映射）
+            # - analyst_only 模式不写 episode（无 final_decision/directional_confidence 可落库）
+            # - 解析失败写 status=parse_failed，不入 STM 注入、不入校准分母
+            try:
+                self._write_episode(commodity, task, result, mem_ctx)
+            except Exception as e:
+                # 记忆写入失败不阻塞主流程
+                logger.error(f"[memory] 写 episode 失败 {commodity}: {e}")
+        finally:
+            # record_insight 的 run 限次上下文必须清理，避免线程复用时串味
+            reset_run_context()
 
         return result
 
-    def _write_episode(self, commodity: str, task: AnalysisTask, result: Dict[str, Any]) -> None:
+    def _build_memory_context(
+        self, commodity: str, task: AnalysisTask
+    ) -> Optional["MemoryContext"]:
+        """【阶段3】构建记忆上下文；use_memory=False 或构建失败返回 None。
+
+        记忆读取与 cache 是否命中无关：缓存命中时直接复用旧结果、不重跑分析，
+        episode 写入也只发生在真正跑分析时（见 plan 四.阶段1）。
+        """
+        if not task.config.get("use_memory", True):
+            return None
+
+        run_id = f"{task.task_id}_{commodity}"
+        # 绑定 run 上下文，供 record_insight 做单次 run 限次（【三评 E】）
+        set_run_context(run_id)
+        try:
+            ctx = memory_builder.build_context(
+                symbol=commodity,
+                analysis_date=task.analysis_date,
+                run_id=run_id,
+            )
+            logger.info(
+                f"[memory] {commodity} 记忆上下文 has_prior={ctx.has_prior} "
+                f"token≈{ctx.token_count} eps={len(ctx.injected_episode_ids)}"
+            )
+            return ctx
+        except Exception as e:
+            logger.warning(f"[memory] {commodity} 记忆上下文构建失败，本次不注入: {e}")
+            return None
+
+    def _write_episode(
+        self,
+        commodity: str,
+        task: AnalysisTask,
+        result: Dict[str, Any],
+        memory_ctx: Optional["MemoryContext"] = None,
+    ) -> None:
         """【三评 / 阶段1】把本次分析结论落库为一条 episode。
 
         字段映射（中英文翻译 + 数值翻译成中文，见 memory-system-plan.md 三.1）：
@@ -263,6 +317,9 @@ class AnalysisManager:
 
         exec_decision = result.get("executive_decision") or {}
         run_id = f"{task.task_id}_{commodity}"
+        injected_tokens = memory_ctx.token_count if memory_ctx else 0
+        # 【二评 + 三评】has_prior / memory_refs 由服务端补齐，不由 agent 自填
+        self._attach_memory_fields(exec_decision, memory_ctx)
 
         # 取判据字段；缺失或 {"raw": ...} 兜底 → parse_failed
         final_decision = exec_decision.get("final_decision")
@@ -289,6 +346,7 @@ class AnalysisManager:
                 horizon=10,
                 status=EpisodeStatus.PARSE_FAILED.value,
                 is_canonical=True,
+                injected_tokens=injected_tokens,
             )
             memory_service.write_episode(episode)
             logger.warning(
@@ -332,12 +390,53 @@ class AnalysisManager:
             horizon=10,
             status=EpisodeStatus.PENDING.value,
             is_canonical=True,
+            injected_tokens=injected_tokens,
         )
         episode_id = memory_service.write_episode(episode)
         logger.info(
             f"[memory] {commodity} {task.analysis_date} episode 写入 id={episode_id} "
             f"dir={direction_enum.value} conf={confidence:.2f}"
         )
+
+    @staticmethod
+    def _attach_memory_fields(
+        decision: Dict[str, Any], memory_ctx: Optional["MemoryContext"]
+    ) -> None:
+        """【二评 + 三评】has_prior / memory_refs 由服务端补齐，不由 agent 自填。
+
+        - has_prior 是 ContextBuilder 已知的事实，让 agent 回写等于多开一个幻觉面；
+        - memory_refs 只允许引用本次 prompt 实际注入过的 id，无效 id 丢弃且不报错；
+        - use_memory=False（memory_ctx=None）时清掉这几个字段，保证 A/B 两侧输出口径一致。
+        """
+        if memory_ctx is None:
+            for key in ("has_prior", "change_vs_last", "change_reason", "memory_refs"):
+                decision.pop(key, None)
+            return
+
+        decision["has_prior"] = bool(memory_ctx.has_prior)
+        if not memory_ctx.has_prior:
+            # 首日场景强制 first_run，避免 agent 为不存在的"上次结论"编造变化理由
+            decision["change_vs_last"] = "first_run"
+        elif not decision.get("change_vs_last"):
+            decision["change_vs_last"] = "unchanged"
+
+        allowed = set(memory_ctx.injected_episode_ids) | set(memory_ctx.injected_semantic_ids)
+        refs = decision.get("memory_refs")
+        kept: List[int] = []
+        if isinstance(refs, list):
+            for ref in refs:
+                try:
+                    ref_id = int(ref)
+                except (TypeError, ValueError):
+                    continue
+                if ref_id in allowed:
+                    kept.append(ref_id)
+            if len(refs) != len(kept):
+                logger.info(
+                    f"[memory] memory_refs 过滤 {len(refs)} → {len(kept)} "
+                    f"（只允许引用本次注入过的 id）"
+                )
+        decision["memory_refs"] = kept
 
     def _run_module_analysis(self, commodity: str, module_name: str, task: AnalysisTask) -> Dict[str, Any]:
         """运行单个模块分析 - 只读 CSV 元信息（不调 LLM）。
@@ -402,11 +501,22 @@ class AnalysisManager:
             tool_map={
                 "read_module_data": read_module_data,
                 "search_news_data": search_news_data,
+                # 【阶段3】记忆工具：search_memory / get_related_symbols / record_insight
+                **MEMORY_TOOL_MAP,
             },
             model=model,
         )
 
-    def _run_debate(self, commodity: str, modules: Dict, task: AnalysisTask) -> Dict[str, Any]:
+    @staticmethod
+    def _with_memory(user_msg: str, memory_context: str) -> str:
+        """把记忆段放在 user_msg 最前面（【二评】固定前缀，每轮都带）。"""
+        if not memory_context:
+            return user_msg
+        return f"{memory_context}\n\n{user_msg}"
+
+    def _run_debate(
+        self, commodity: str, modules: Dict, task: AnalysisTask, memory_context: str = ""
+    ) -> Dict[str, Any]:
         """运行多空辩论 - 调用 DebateOrchestrator"""
         max_rounds = task.config.get("debate_rounds", 3)
         model = _resolve_model(task)
@@ -415,6 +525,8 @@ class AnalysisManager:
             max_rounds=max_rounds,
             symbol=commodity,
             modules=list(modules.keys()) if isinstance(modules, dict) else list(modules),
+            # 【二评】记忆段每轮都带；check_consensus（Macro 裁判）不注入，保持裁判独立性
+            memory_context=memory_context,
         )
         try:
             return orch.run()
@@ -429,7 +541,14 @@ class AnalysisManager:
                 "winner": "split",
             }
 
-    def _run_trader(self, commodity: str, modules: Dict, debate: Dict, task: AnalysisTask) -> Dict[str, Any]:
+    def _run_trader(
+        self,
+        commodity: str,
+        modules: Dict,
+        debate: Dict,
+        task: AnalysisTask,
+        memory_context: str = "",
+    ) -> Dict[str, Any]:
         """运行交易员分析 - 单 agent ReAct"""
         model = _resolve_model(task)
         agent = self._make_agent("Trader", TRADER_PROMPT, model)
@@ -445,12 +564,18 @@ class AnalysisManager:
             f"=== 辩论结论 ===\n{json.dumps(debate_summary, ensure_ascii=False)}\n"
             f"=== 请基于辩论结论和 technical_analysis 数据，给出交易方案 ==="
         )
-        result = agent.run(user_msg)
+        result = agent.run(self._with_memory(user_msg, memory_context))
         parsed = result.get("parsed", {})
         parsed["trace"] = result.get("trace", [])
         return parsed
 
-    def _run_risk_management(self, commodity: str, trader_result: Dict, task: AnalysisTask) -> Dict[str, Any]:
+    def _run_risk_management(
+        self,
+        commodity: str,
+        trader_result: Dict,
+        task: AnalysisTask,
+        memory_context: str = "",
+    ) -> Dict[str, Any]:
         """运行风控管理 - 单 agent ReAct"""
         model = _resolve_model(task)
         agent = self._make_agent("RiskManager", RISK_MANAGER_PROMPT, model)
@@ -459,12 +584,19 @@ class AnalysisManager:
             f"=== 交易员方案 ===\n{json.dumps(trader_result, ensure_ascii=False)}\n"
             f"=== 请审核风险并给风控意见，可复查 technical_analysis 的 ATR/波动率 ==="
         )
-        result = agent.run(user_msg)
+        result = agent.run(self._with_memory(user_msg, memory_context))
         parsed = result.get("parsed", {})
         parsed["trace"] = result.get("trace", [])
         return parsed
 
-    def _run_executive_decision(self, commodity: str, trader: Dict, risk: Dict, task: AnalysisTask) -> Dict[str, Any]:
+    def _run_executive_decision(
+        self,
+        commodity: str,
+        trader: Dict,
+        risk: Dict,
+        task: AnalysisTask,
+        memory_context: str = "",
+    ) -> Dict[str, Any]:
         """运行CIO最终决策 - 单 agent ReAct（不调工具，纯推理）"""
         model = _resolve_model(task)
         # CIO 不需要工具，纯推理
@@ -482,7 +614,7 @@ class AnalysisManager:
             f"=== 风控意见 ===\n{json.dumps(risk, ensure_ascii=False)}\n"
             f"=== 请综合给出最终决策 ==="
         )
-        result = agent.run(user_msg)
+        result = agent.run(self._with_memory(user_msg, memory_context))
         parsed = result.get("parsed", {})
         parsed["trace"] = result.get("trace", [])
         return parsed

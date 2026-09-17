@@ -57,6 +57,8 @@ class AnalysisRequest(BaseModel):
     use_realtime: bool = Field(default=True, description="使用实时数据")
     debate_rounds: int = Field(default=3, ge=0, le=5, description="辩论轮数")
     force_refresh: bool = Field(default=False, description="强制刷新缓存")
+    # 【阶段3】是否启用历史记忆注入，前端可关，便于 A/B 评测（二.4 / 四.阶段3）
+    use_memory: bool = Field(default=True, description="启用历史记忆与关联品种注入")
 
 
 class AnalysisTask(BaseModel):
@@ -116,4 +118,6 @@ class ScheduledConfig(BaseModel):
     auto_email: bool = False
     auto_word: bool = False
     update_data_before_analysis: bool = True
+    # 【阶段3】定时分析默认开启记忆（二评定：建议默认 True）
+    use_memory: bool = True
     last_run_date: Optional[str] = None

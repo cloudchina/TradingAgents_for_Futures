@@ -18,15 +18,16 @@ from core.settings import settings  # noqa: E402
 # 需在业务模块导入前完成，否则导入期的日志会走 loguru 默认格式
 setup_logging(logs_dir=settings.LOGS_DIR, console_level="INFO", file_level="DEBUG")
 
-# 取数模块大多经由 akshare 请求第三方数据源且不设超时，统一注入默认超时避免任务被永久阻塞
-install_default_timeout()
-
 from loguru import logger  # noqa: E402
 
 from fastapi import FastAPI  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from core.llm_config import llm_config  # noqa: E402
 from core.net import install_default_timeout  # noqa: E402
+
+# 取数模块大多经由 akshare 请求第三方数据源且不设超时，统一注入默认超时避免任务被永久阻塞
+# 必须在 import 之后调用（原来写在 import 之前会 NameError，后端直接起不来）
+install_default_timeout()
 from routers import analysis, data, llm, memory, scheduled, system  # noqa: E402
 
 
@@ -57,6 +58,17 @@ async def lifespan(app: FastAPI):
         logger.info(f"  记忆库已初始化: {memory_service._resolve_db_path()}")
     except Exception as e:
         logger.error(f"  记忆库初始化失败（不阻塞启动）: {e}")
+
+    # 【阶段4】复盘回填调度：独立 daemon 线程，默认每日 20:00 触发
+    # 与定时分析解耦（独立 thread + Event，不抢主线程，也不受分析任务阻塞影响）
+    if settings.MEMORY_BACKFILL_ENABLED:
+        try:
+            from services.backfill_scheduler import backfill_runner
+
+            backfill_runner.start()
+            logger.info(f"  复盘回填调度已启动: 每天 {backfill_runner.schedule_time}")
+        except Exception as e:
+            logger.error(f"  复盘回填调度启动失败（不阻塞启动）: {e}")
 
     yield
 

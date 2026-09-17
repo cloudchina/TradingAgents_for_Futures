@@ -15,23 +15,35 @@ from agents.tools.data_reader import read_module_data
 from agents.tools.news_tool import search_news_data
 from agents.prompts.system_prompts import BULL_ANALYST_PROMPT, BEAR_ANALYST_PROMPT
 from agents.debate.consensus import check_consensus
+from agents.tools.memory_tools import MEMORY_TOOL_MAP
 
 
-# 共用工具映射表
+# 共用工具映射表（含【阶段3】记忆工具）
 TOOL_MAP = {
     "read_module_data": read_module_data,
     "search_news_data": search_news_data,
+    **MEMORY_TOOL_MAP,
 }
 
 
 class DebateOrchestrator:
     """多空辩论编排器"""
 
-    def __init__(self, model: str, max_rounds: int, symbol: str, modules: List[str]):
+    def __init__(
+        self,
+        model: str,
+        max_rounds: int,
+        symbol: str,
+        modules: List[str],
+        memory_context: str = "",
+    ):
         self.model = model
         self.max_rounds = max_rounds
         self.symbol = symbol
         self.modules = modules
+        # 【二评】记忆段必须每轮都带：作为 user_msg 的固定前缀，
+        # 仅在 __init__ 存一次会退化成"只有 Round 1 有记忆"
+        self.memory_context = memory_context or ""
 
         # 构造 Bull / Bear agent（共用工具集）
         self.bull_agent = ReActAgent(
@@ -163,7 +175,7 @@ class DebateOrchestrator:
                 f"关键证据: {bear_view.get('key_evidence')}\n"
                 f"=== 请回应 Bear 的反驳，可复查数据，给出本轮看多观点 ==="
             )
-        return self._wrap_agent_result(self.bull_agent.run(user_msg))
+        return self._wrap_agent_result(self.bull_agent.run(self._with_memory(user_msg)))
 
     def _run_bear(self, round_idx: int, bull_view: Dict[str, Any]) -> Dict[str, Any]:
         """执行 Bear 的 ReAct，看到 Bull 本轮结论后反驳。"""
@@ -176,7 +188,13 @@ class DebateOrchestrator:
             f"关键证据: {bull_view.get('key_evidence')}\n"
             f"=== 请反驳 Bull 的论点，可查数据，给出本轮看空观点 ==="
         )
-        return self._wrap_agent_result(self.bear_agent.run(user_msg))
+        return self._wrap_agent_result(self.bear_agent.run(self._with_memory(user_msg)))
+
+    def _with_memory(self, user_msg: str) -> str:
+        """把记忆段作为 user_msg 的固定前缀（【二评】每轮都带）。"""
+        if not self.memory_context:
+            return user_msg
+        return f"{self.memory_context}\n\n{user_msg}"
 
     @staticmethod
     def _wrap_agent_result(agent_res: Dict[str, Any]) -> Dict[str, Any]:

@@ -191,6 +191,8 @@ class ScheduledAnalysisRunner:
             ai_model=self.config.ai_model,
             use_realtime=self.config.use_realtime,
             debate_rounds=self.config.debate_rounds,
+            # 【阶段3】定时分析透传记忆开关（默认 True）
+            use_memory=getattr(self.config, "use_memory", True),
         )
 
         task = analysis_manager.submit_task(request, task_type="scheduled")

@@ -44,6 +44,9 @@ CURRENT_SCHEMA_VERSION = 1
 STM_WINDOW = 10
 FORECAST_HORIZONS = (5, 10)
 
+# 二.4 LTM 候选集上限：先取最近 N 条再打分，避免全表扫描
+LTM_CANDIDATE_LIMIT = 200
+
 # 二.4 reliability 三层 fallback 最小样本数
 RELIABILITY_MIN_N = 5
 
@@ -336,18 +339,79 @@ class MemoryService:
             return self._row_to_episode(row) if row else None
 
     def get_recent_episodes(
-        self, symbol: str, limit: int = STM_WINDOW
+        self,
+        symbol: str,
+        limit: int = STM_WINDOW,
+        before_date: Optional[str] = None,
     ) -> List[Episode]:
-        """STM：取近 N 条 canonical episode（不含 parse_failed/unverifiable）。"""
+        """STM/LTM 候选集：取近 N 条 canonical episode（不含 parse_failed/unverifiable）。
+
+        【阶段3】before_date：只取早于该日期的 episode。注入发生在写库之前，
+        同一天 force_refresh 重跑时若不加此过滤，会把本次之外的同日旧 run 也当成"历史结论"注入。
+        """
+        sql = (
+            "SELECT * FROM episodes "
+            "WHERE symbol=? AND is_canonical=1 "
+            "  AND status IN ('pending', 'resolved') "
+        )
+        params: List[Any] = [symbol]
+        if before_date:
+            sql += "  AND analysis_date < ? "
+            params.append(before_date)
+        sql += "ORDER BY analysis_date DESC LIMIT ?"
+        params.append(limit)
+        with self._connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+            return [self._row_to_episode(r) for r in rows]
+
+    def get_hit_rates(self, symbol: str, limit: int = 200) -> Dict[str, Any]:
+        """【二.4 / 三评 D】reliability 三层 fallback 的数据源。
+
+        返回 {"symbol_rate": float|None, "symbol_n": int,
+              "global_rate": float|None, "global_n": int}
+        - symbol_rate：该品种最近 limit 条 resolved canonical episode 的命中率，
+          样本数 < RELIABILITY_MIN_N 时置 None（调用方回退到全局）
+        - global_rate：全库 resolved canonical episode 命中率，样本不足同样置 None
+        """
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT * FROM episodes "
-                "WHERE symbol=? AND is_canonical=1 "
-                "  AND status IN ('pending', 'resolved') "
+                "SELECT symbol, outcome FROM episodes "
+                "WHERE is_canonical=1 AND status='resolved' "
                 "ORDER BY analysis_date DESC LIMIT ?",
-                (symbol, limit),
+                (limit * 5,),
             ).fetchall()
-            return [self._row_to_episode(r) for r in rows]
+
+        sym_hit = sym_total = glob_hit = glob_total = 0
+        for r in rows:
+            hit = self._extract_hit(r["outcome"])
+            if hit is None:
+                continue
+            glob_total += 1
+            glob_hit += 1 if hit else 0
+            if r["symbol"] == symbol and sym_total < limit:
+                sym_total += 1
+                sym_hit += 1 if hit else 0
+
+        return {
+            "symbol_rate": (sym_hit / sym_total) if sym_total >= RELIABILITY_MIN_N else None,
+            "symbol_n": sym_total,
+            "global_rate": (glob_hit / glob_total) if glob_total >= RELIABILITY_MIN_N else None,
+            "global_n": glob_total,
+        }
+
+    @staticmethod
+    def _extract_hit(outcome_raw: Optional[str]) -> Optional[bool]:
+        """从 outcome JSON 串取 hit；无 outcome 或字段缺失返回 None。"""
+        if not outcome_raw:
+            return None
+        try:
+            data = json.loads(outcome_raw)
+        except Exception:
+            return None
+        if not isinstance(data, dict):
+            return None
+        hit = data.get("hit")
+        return bool(hit) if isinstance(hit, (bool, int)) else None
 
     def update_outcome(
         self, episode_id: int, outcome: Dict[str, Any], status: str
@@ -361,7 +425,114 @@ class MemoryService:
                 (json.dumps(outcome, ensure_ascii=False), status, episode_id),
             )
 
+    def list_pending_episodes(
+        self, symbols: Optional[List[str]] = None, limit: int = 1000
+    ) -> List[Episode]:
+        """【阶段4】取所有待回填的 episode（status=pending 且 canonical），按日期升序。"""
+        sql = (
+            "SELECT * FROM episodes WHERE status='pending' AND is_canonical=1 "
+        )
+        params: List[Any] = []
+        if symbols:
+            placeholders = ",".join("?" * len(symbols))
+            sql += f" AND symbol IN ({placeholders}) "
+            params.extend(symbols)
+        sql += " ORDER BY analysis_date ASC LIMIT ?"
+        params.append(limit)
+        with self._connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+            return [self._row_to_episode(r) for r in rows]
+
+    def list_episodes_by_status(
+        self, status: str, symbols: Optional[List[str]] = None, limit: int = 5000
+    ) -> List[Episode]:
+        """【阶段4】按 status 取 episode（compute_stats 用）。"""
+        sql = "SELECT * FROM episodes WHERE status=? "
+        params: List[Any] = [status]
+        if symbols:
+            placeholders = ",".join("?" * len(symbols))
+            sql += f" AND symbol IN ({placeholders}) "
+            params.extend(symbols)
+        sql += " ORDER BY analysis_date DESC LIMIT ?"
+        params.append(limit)
+        with self._connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+            return [self._row_to_episode(r) for r in rows]
+
     # ─── Semantic 读写（骨架阶段仅基本方法） ───
+
+    def update_semantic_status(
+        self,
+        semantic_id: int,
+        status: str,
+        evidence_count: Optional[int] = None,
+        confidence: Optional[float] = None,
+        last_seen: Optional[str] = None,
+    ) -> None:
+        """【阶段4】语义记忆状态流转：draft → pending → active / archived。"""
+        sets = ["status=?"]
+        params: List[Any] = [status]
+        if evidence_count is not None:
+            sets.append("evidence_count=?")
+            params.append(evidence_count)
+        if confidence is not None:
+            sets.append("confidence=?")
+            params.append(confidence)
+        if last_seen:
+            sets.append("last_seen=?")
+            params.append(last_seen)
+        params.append(semantic_id)
+        with self._connect() as conn:
+            conn.execute(
+                f"UPDATE semantics SET {', '.join(sets)} WHERE id=?", params
+            )
+
+    def write_semantic(self, sem: Semantic) -> int:
+        """写入一条语义记忆。
+
+        阶段3 的 record_insight 落库一律 status='draft'（防幻觉，见二.2.B）；
+        阶段4 巩固 Job 与二次校验负责 draft → active 的流转。
+        """
+        with self._connect() as conn:
+            cur = conn.execute(
+                """
+                INSERT INTO semantics (
+                    symbol, claim, category, evidence_count,
+                    confidence, stat_confidence, llm_confidence,
+                    first_seen, last_seen, sources, status,
+                    invoked_count, failed_invocations,
+                    auto_activated_at, reviewed_by
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    sem.symbol, sem.claim, sem.category, sem.evidence_count,
+                    sem.confidence, sem.stat_confidence, sem.llm_confidence,
+                    sem.first_seen, sem.last_seen,
+                    json.dumps(sem.sources, ensure_ascii=False),
+                    sem.status, sem.invoked_count, sem.failed_invocations,
+                    sem.auto_activated_at, sem.reviewed_by,
+                ),
+            )
+            return cur.lastrowid or 0
+
+    def list_semantics(
+        self,
+        symbol: Optional[str] = None,
+        status: Optional[str] = None,
+    ) -> List[Semantic]:
+        """按 symbol / status 查语义记忆（阶段5 前端 review 列表用）。"""
+        sql = "SELECT * FROM semantics WHERE 1=1 "
+        params: List[Any] = []
+        if symbol:
+            sql += " AND symbol=? "
+            params.append(symbol)
+        if status:
+            sql += " AND status=? "
+            params.append(status)
+        sql += " ORDER BY last_seen DESC, id DESC "
+        with self._connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+            return [self._row_to_semantic(r) for r in rows]
 
     def list_active_semantics(self, symbol: str) -> List[Semantic]:
         """注入 prompt 时硬过滤：status=active AND evidence>=3 AND confidence>=0.5"""

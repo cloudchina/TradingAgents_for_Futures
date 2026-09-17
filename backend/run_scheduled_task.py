@@ -68,6 +68,9 @@ def build_config_from_args(argv=None) -> ScheduledConfig:
     parser.add_argument("--no-auto-word", dest="auto_word", action="store_false")
     parser.add_argument("--auto-email", dest="auto_email", action="store_true", default=None)
     parser.add_argument("--no-auto-email", dest="auto_email", action="store_false")
+    # 【阶段4】只跑复盘回填（不跑分析）：python run_scheduled_task.py --memory-backfill
+    parser.add_argument("--memory-backfill", dest="memory_backfill", action="store_true",
+                        help="只执行记忆体系复盘回填（回填+巩固+统计），不提交分析任务")
     args = parser.parse_args(argv)
 
     config_dict = {}
@@ -120,6 +123,18 @@ def build_config_from_args(argv=None) -> ScheduledConfig:
 
 
 def main() -> int:
+    # 【阶段4】--memory-backfill 不需要品种参数，必须在配置校验之前拦截
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument("--memory-backfill", dest="memory_backfill", action="store_true")
+    pre.add_argument("--config")
+    known, _ = pre.parse_known_args()
+    if known.memory_backfill:
+        from services.backfill_scheduler import backfill_runner
+
+        result = backfill_runner.run_once()
+        logger.info(f"复盘回填完成: {result.get('backfill')}")
+        return 0 if "error" not in result.get("backfill", {}) else 1
+
     try:
         config = build_config_from_args()
     except SystemExit as e:

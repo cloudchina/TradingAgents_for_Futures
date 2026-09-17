@@ -45,6 +45,10 @@ class Settings(BaseSettings):
     # 本地开发时必须在 backend/.env 改写为本地路径，否则 Windows 会把 /app/data/... 解析为 C:\app\data\...
     MEMORY_DIR: str = Field(default="", description="记忆库目录；空=fallback 到 <DATA_ROOT_DIR>/../memory")
 
+    # 【阶段4】复盘回填调度（ScheduledBackfillRunner）
+    MEMORY_BACKFILL_ENABLED: bool = Field(default=True, description="启动时自动拉起复盘回填调度")
+    MEMORY_BACKFILL_TIME: str = Field(default="20:00", description="每日回填触发时间 HH:MM")
+
     # 系统配置
     DEFAULT_DAYS_BACK: int = Field(default=3, description="默认回溯天数")
     MAX_NEWS_PER_CATEGORY: int = Field(default=50, description="每类最大新闻数")
