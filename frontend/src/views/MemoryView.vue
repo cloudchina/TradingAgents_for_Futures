@@ -179,24 +179,48 @@
           <!-- 校准曲线 -->
           <el-tab-pane label="📈 置信度校准" name="stats">
             <el-descriptions :column="2" border size="small" class="block">
-              <el-descriptions-item label="样本数">{{ stats.n || 0 }}</el-descriptions-item>
-              <el-descriptions-item label="命中数">{{ stats.hits || 0 }}</el-descriptions-item>
+              <el-descriptions-item label="样本数（已复盘）">{{ stats.n_resolved || 0 }}</el-descriptions-item>
+              <el-descriptions-item label="命中数">{{ stats.n_hits ?? 0 }}</el-descriptions-item>
               <el-descriptions-item label="命中率">{{ pct(stats.hit_rate) }}</el-descriptions-item>
               <el-descriptions-item label="平均收益">{{ pct(stats.avg_return) }}</el-descriptions-item>
               <el-descriptions-item label="平均 MAE">{{ pct(stats.avg_mae) }}</el-descriptions-item>
-              <el-descriptions-item label="不可验证">{{ stats.unverifiable ?? 0 }}</el-descriptions-item>
+              <el-descriptions-item label="不可验证">{{ stats.n_unverifiable ?? 0 }}</el-descriptions-item>
+              <!-- 【三评 J】验收指标：ECE ≤ 0.05、分档偏差 ≤ 0.10 才算置信度可信 -->
+              <el-descriptions-item label="ECE（校准误差）">
+                <el-tag size="small" :type="(stats.ece ?? 1) <= 0.05 ? 'success' : 'warning'">
+                  {{ (stats.ece ?? 0).toFixed(4) }}
+                </el-tag>
+                <span class="hint">阈值 ≤ 0.05</span>
+              </el-descriptions-item>
+              <el-descriptions-item label="最大分档偏差">
+                <el-tag size="small" :type="(stats.max_bin_gap ?? 1) <= 0.1 ? 'success' : 'warning'">
+                  {{ (stats.max_bin_gap ?? 0).toFixed(4) }}
+                </el-tag>
+                <span class="hint">阈值 ≤ 0.10</span>
+              </el-descriptions-item>
             </el-descriptions>
 
             <el-divider content-position="left">置信度分档 vs 实际胜率</el-divider>
             <el-table :data="stats.by_confidence || []" size="small" border>
               <el-table-column prop="bin" label="置信度档" width="120" />
               <el-table-column prop="n" label="样本" width="90" />
-              <el-table-column label="实际胜率" min-width="240">
+              <el-table-column label="实际胜率" min-width="200">
                 <template #default="{ row }">
                   <el-progress
                     :percentage="Math.round((row.hit_rate || 0) * 100)"
                     :color="progressColor(row.hit_rate)"
                   />
+                </template>
+              </el-table-column>
+              <el-table-column label="平均置信度" width="110">
+                <template #default="{ row }">{{ (row.avg_confidence ?? 0).toFixed(3) }}</template>
+              </el-table-column>
+              <el-table-column label="偏差" width="90">
+                <template #default="{ row }">
+                  <el-tag
+                    size="small"
+                    :type="(row.gap ?? 0) <= 0.1 ? 'success' : 'warning'"
+                  >{{ (row.gap ?? 0).toFixed(3) }}</el-tag>
                 </template>
               </el-table-column>
             </el-table>
@@ -478,6 +502,11 @@ onMounted(async () => {
   display: flex;
   align-items: center;
   justify-content: space-between;
+}
+.hint {
+  margin-left: 6px;
+  color: #909399;
+  font-size: 12px;
 }
 .card-title {
   font-size: 16px;

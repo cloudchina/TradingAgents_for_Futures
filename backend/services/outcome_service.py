@@ -462,6 +462,7 @@ class OutcomeService:
             "generated_at": datetime.now().isoformat(timespec="seconds"),
             "symbol": (symbol or "ALL").upper(),
             "n_resolved": n,
+            "n_hits": hits,
             "n_unverifiable": unverifiable,
             "hit_rate": round(hits / n, 4) if n else 0.0,
             "by_direction": {},
@@ -470,6 +471,9 @@ class OutcomeService:
             "avg_return": 0.0,
             "avg_mae": 0.0,
             "error_patterns": {},
+            # 【三评 J】验收指标：ECE（期望校准误差）与最大分档偏差
+            "ece": 0.0,
+            "max_bin_gap": 0.0,
         }
         if n == 0:
             return result
@@ -485,8 +489,11 @@ class OutcomeService:
                 "hit_rate": round(sub_hits / len(sub), 4),
             }
 
-        # 校准曲线：置信度分 5 档 vs 实际命中率
+        # 校准曲线：置信度分 5 档 vs 实际命中率；顺带算 ECE 与最大分档偏差
+        # 【三评 J】验收：ECE ≤ 0.05、分档偏差 ≤ 0.10 才算"置信度可信"
         bins = [(0.0, 0.2), (0.2, 0.4), (0.4, 0.6), (0.6, 0.8), (0.8, 1.01)]
+        ece = 0.0
+        max_gap = 0.0
         for lo_bin, hi_bin in bins:
             sub = [
                 e for e in episodes
@@ -495,11 +502,20 @@ class OutcomeService:
             if not sub:
                 continue
             sub_hits = sum(1 for e in sub if isinstance(e.outcome, dict) and e.outcome.get("hit"))
+            hit_rate = sub_hits / len(sub)
+            avg_conf = sum((e.confidence or 0.0) for e in sub) / len(sub)
+            gap = abs(avg_conf - hit_rate)
+            ece += len(sub) / n * gap
+            max_gap = max(max_gap, gap)
             result["by_confidence"].append({
                 "bin": f"{lo_bin:.1f}-{min(hi_bin, 1.0):.1f}",
                 "n": len(sub),
-                "hit_rate": round(sub_hits / len(sub), 4),
+                "hit_rate": round(hit_rate, 4),
+                "avg_confidence": round(avg_conf, 4),
+                "gap": round(gap, 4),
             })
+        result["ece"] = round(ece, 4)
+        result["max_bin_gap"] = round(max_gap, 4)
 
         # 换月样本
         rolled_eps = [

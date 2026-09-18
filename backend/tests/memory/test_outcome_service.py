@@ -313,6 +313,45 @@ def test_stats_calibration_bins(svc, memory_svc, days):
     assert stats["n_resolved"] == 5
     assert len(stats["by_confidence"]) >= 3
     assert all(0.0 <= b["hit_rate"] <= 1.0 for b in stats["by_confidence"])
+    # 每档都带 avg_confidence / gap，供验收指标判定
+    assert all("avg_confidence" in b and "gap" in b for b in stats["by_confidence"])
+
+
+def test_stats_ece_and_max_bin_gap(svc, memory_svc, days):
+    """【三评 J】ECE 与最大分档偏差必须可量化，否则"置信度是否可信"无法验收。
+
+    构造：0.9 档 4 条全命中（gap≈0.1）、0.5 档 4 条全未命中（gap≈0.5）。
+    ECE = 0.5×0.1 + 0.5×0.5 = 0.3，max_bin_gap = 0.5。
+    """
+    for i in range(4):  # 高置信全中
+        memory_svc.write_episode(_ep("JM", days[i], "long", horizon=5, conf=0.9))
+    for i in range(4, 8):  # 中置信全错（做空，JM 在涨）
+        memory_svc.write_episode(_ep("JM", days[i], "short", horizon=5, conf=0.5))
+
+    svc.backfill(as_of=days[14])
+    stats = svc.compute_stats(persist=False)
+
+    assert stats["n_resolved"] == 8
+    assert stats["ece"] == pytest.approx(0.3, abs=0.02)
+    assert stats["max_bin_gap"] == pytest.approx(0.5, abs=0.02)
+
+
+def test_stats_ece_zero_when_well_calibrated(svc, memory_svc, days):
+    """校准良好（说 0.9、10 条中 9 条 → 实际 90%）→ 分档无偏差，ECE = 0。"""
+    # 直接用 outcome 落库，避开合成价格的可控性限制
+    for i in range(10):
+        ep = _ep("JM", days[i], "long", horizon=5, conf=0.9)
+        memory_svc.write_episode(ep)
+    eps = memory_svc.list_episodes_by_status("pending")
+    for i, e in enumerate(eps):
+        memory_svc.update_outcome(
+            e.id, {"hit": i < 9, "realized_return": 0.01}, EpisodeStatus.RESOLVED.value
+        )
+
+    stats = svc.compute_stats(persist=False)
+    assert stats["n_resolved"] == 10
+    assert abs(stats["ece"]) < 1e-9        # |0.9 - 0.9| = 0
+    assert stats["max_bin_gap"] < 1e-9
 
 
 # ─────────────────────────────────────────────────────────────
