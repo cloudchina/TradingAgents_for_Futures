@@ -70,6 +70,33 @@ export const analysisApi = {
     }),
 }
 
+// ====== 记忆体系 API（阶段0/2/4/5） ======
+export const memoryApi = {
+  health: () => api.get('/memory/health'),
+  init: () => api.post('/memory/init'),
+  // 数据可用性（阶段0）
+  getAvailability: () => api.get('/memory/availability'),
+  refreshAvailability: () => api.post('/memory/availability/refresh'),
+  // 复盘回填 / 巩固 / 统计（阶段4）
+  backfill: (symbols) =>
+    api.post('/memory/backfill', null, { params: symbols ? { symbols } : {} }),
+  consolidate: (symbol) =>
+    api.post('/memory/consolidate', null, { params: symbol ? { symbol } : {} }),
+  getStats: (symbol) => api.get('/memory/stats', { params: symbol ? { symbol } : {} }),
+  // 品种记忆详情（阶段2+5）
+  getSymbol: (symbol) => api.get(`/memory/symbols/${symbol}`),
+  getRelations: () => api.get('/memory/relations'),
+  refreshRelations: (symbols) =>
+    api.post('/memory/relations/refresh', null, { params: symbols ? { symbols } : {} }),
+  // 人工记忆
+  addNote: (data) => api.post('/memory/note', data),
+  listNotes: (symbol) => api.get('/memory/notes', { params: symbol ? { symbol } : {} }),
+  deleteNote: (id) => api.delete(`/memory/notes/${id}`),
+  // 语义记忆人工覆盖（决策3）
+  reviewSemantic: (id, action, reviewer = 'human') =>
+    api.post(`/memory/semantics/${id}/review`, { action, reviewer }),
+}
+
 // ====== 定时分析 API ======
 // 🔧 清理(P2)：移除无调用封装 getStatus（后端亦无 /scheduled/status 路由）
 export const scheduledApi = {

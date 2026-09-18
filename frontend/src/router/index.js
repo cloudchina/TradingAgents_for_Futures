@@ -35,6 +35,12 @@ const routes = [
     component: () => import('@/views/LLMConfig.vue'),
     meta: { title: 'LLM配置' },
   },
+  {
+    path: '/memory',
+    name: 'Memory',
+    component: () => import('@/views/MemoryView.vue'),
+    meta: { title: '记忆体系' },
+  },
 ]
 
 const router = createRouter({

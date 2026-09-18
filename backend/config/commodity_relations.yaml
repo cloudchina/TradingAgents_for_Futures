@@ -1,0 +1,66 @@
+# 品种关联图谱（静态部分）— 阶段 2
+#
+# 关系为**无序对称关系**（【二评 / 决策 4】）：分析 HC 时 RB 是关联方，分析 RB 时 HC 也是关联方，
+# 同一条记录互为镜像，不重复存储、不重复计算。
+# 加载时把 members 展开为 C(n,2) 条无序对，pair_key = "-".join(sorted([a, b]))。
+#
+# 字段口径：
+# - strength 必填（缺省回退 0.5，**禁止回退 0**：related_relevance 是乘式，0 会让整条边消失）
+# - lead 仅用于二元组（members 长度=2），标注哪一端领先
+# - 【三评 H】多元组（长度≥3）不定义 lead：单 lead 无法表达多品种的 lead-lag，
+#   方向关系由 relation_metrics 按每条 pair 单独算 lag 后写入 lead_symbol / lag_days
+relations:
+  - members: [RB, HC]
+    type: substitute      # 替代/套利
+    strength: 0.9
+    note: 卷螺价差套利，螺纹地产需求、热卷制造业需求
+
+  - members: [JM, J]
+    type: upstream        # 焦煤 → 焦炭（原料→成品）
+    strength: 0.9
+    lead: JM              # 焦煤领先焦炭约 1 日
+    lead_hint: 焦煤领先焦炭约 1 日
+
+  - members: [PX, TA]
+    type: upstream        # PX → PTA
+    strength: 0.85
+    lead: PX
+    lead_hint: PX 成本传导至 PTA，滞后 1~2 日
+
+  - members: [I, RB]
+    type: upstream        # 铁矿 → 成材成本
+    strength: 0.75
+    lead: I
+    lead_hint: 铁矿成本传导，螺纹跟随
+
+  - members: [Y, P, OI]
+    type: substitute      # 油脂替代（三元组 → Y-P / Y-OI / P-OI）
+    strength: 0.8
+    note: 豆油/棕榈油/菜油互为替代，需求端可切换
+
+  - members: [SC, FU, LU, BU]
+    type: chain           # 原油产业链（四元组 → 6 条无序对）
+    strength: 0.8
+    note: 原油 → 燃料油/低硫燃油/沥青，成本同源
+
+  - members: [AU, AG]
+    type: macro           # 宏观同向
+    strength: 0.8
+    note: 贵金属，宏观（实际利率/避险）驱动同向
+
+  - members: [FG, SA]
+    type: chain           # 玻璃-纯碱
+    strength: 0.8
+    lead: SA
+    lead_hint: 纯碱成本传导至玻璃
+
+  - members: [L, PP, V]
+    type: chain           # 聚烯烃
+    strength: 0.75
+    note: 塑料/聚丙烯/PVC，同属氯碱-烯烃链
+
+  - members: [M, RM]
+    type: substitute      # 豆粕-菜粕
+    strength: 0.85
+    lead: M
+    lead_hint: 豆粕主导菜粕定价

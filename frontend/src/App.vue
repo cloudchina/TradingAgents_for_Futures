@@ -37,6 +37,10 @@
             <el-icon><Cpu /></el-icon>
             <span>LLM 配置</span>
           </el-menu-item>
+          <el-menu-item index="/memory">
+            <el-icon><Collection /></el-icon>
+            <span>记忆体系</span>
+          </el-menu-item>
         </el-menu>
       </el-aside>
       <el-main class="app-main">

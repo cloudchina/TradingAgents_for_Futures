@@ -71,6 +71,8 @@ def build_config_from_args(argv=None) -> ScheduledConfig:
     # 【阶段4】只跑复盘回填（不跑分析）：python run_scheduled_task.py --memory-backfill
     parser.add_argument("--memory-backfill", dest="memory_backfill", action="store_true",
                         help="只执行记忆体系复盘回填（回填+巩固+统计），不提交分析任务")
+    parser.add_argument("--memory-relations", dest="memory_relations", action="store_true",
+                        help="只重算品种关联指标（阶段2），不提交分析任务")
     args = parser.parse_args(argv)
 
     config_dict = {}
@@ -126,6 +128,7 @@ def main() -> int:
     # 【阶段4】--memory-backfill 不需要品种参数，必须在配置校验之前拦截
     pre = argparse.ArgumentParser(add_help=False)
     pre.add_argument("--memory-backfill", dest="memory_backfill", action="store_true")
+    pre.add_argument("--memory-relations", dest="memory_relations", action="store_true")
     pre.add_argument("--config")
     known, _ = pre.parse_known_args()
     if known.memory_backfill:
@@ -134,6 +137,13 @@ def main() -> int:
         result = backfill_runner.run_once()
         logger.info(f"复盘回填完成: {result.get('backfill')}")
         return 0 if "error" not in result.get("backfill", {}) else 1
+    if known.memory_relations:
+        # 【阶段2】数据更新后重算动态相关：python run_scheduled_task.py --memory-relations
+        from services.relation_service import relation_service
+
+        stats = relation_service.refresh()
+        logger.info(f"关联指标刷新完成: {stats}")
+        return 0
 
     try:
         config = build_config_from_args()

@@ -468,6 +468,7 @@ class MemoryService:
         evidence_count: Optional[int] = None,
         confidence: Optional[float] = None,
         last_seen: Optional[str] = None,
+        reviewed_by: Optional[str] = None,
     ) -> None:
         """【阶段4】语义记忆状态流转：draft → pending → active / archived。"""
         sets = ["status=?"]
@@ -481,6 +482,12 @@ class MemoryService:
         if last_seen:
             sets.append("last_seen=?")
             params.append(last_seen)
+        if reviewed_by is not None:
+            sets.append("reviewed_by=?")
+            params.append(reviewed_by)
+            if status == "active":
+                sets.append("auto_activated_at=?")
+                params.append(datetime.now().isoformat(timespec="seconds"))
         params.append(semantic_id)
         with self._connect() as conn:
             conn.execute(
@@ -545,6 +552,103 @@ class MemoryService:
                 (symbol, SEMANTIC_MIN_EVIDENCE, SEMANTIC_MIN_CONFIDENCE),
             ).fetchall()
             return [self._row_to_semantic(r) for r in rows]
+
+    # ─── RelationMetric 读写（阶段 2 关联图谱） ───
+
+    def save_relation_metric(self, metric: RelationMetric) -> None:
+        """写入/更新一条关联指标。
+
+        主键 (pair_key, window)：每次刷新覆盖同窗口旧值，保留 updated_at 便于判断新鲜度。
+        """
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO relation_metrics (
+                    pair_key, a, b, window, corr, lead_symbol, lag_days,
+                    corr_source, sample_size, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(pair_key, window) DO UPDATE SET
+                    a=excluded.a,
+                    b=excluded.b,
+                    corr=excluded.corr,
+                    lead_symbol=excluded.lead_symbol,
+                    lag_days=excluded.lag_days,
+                    corr_source=excluded.corr_source,
+                    sample_size=excluded.sample_size,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    metric.pair_key, metric.a, metric.b, metric.window, metric.corr,
+                    metric.lead_symbol, metric.lag_days, metric.corr_source,
+                    metric.sample_size, metric.updated_at,
+                ),
+            )
+
+    def get_relation_metrics(
+        self, symbol: Optional[str] = None, window: Optional[int] = None
+    ) -> List[RelationMetric]:
+        """查关联指标；symbol 为空返回全表（前端图谱用）。"""
+        sql = "SELECT * FROM relation_metrics WHERE 1=1 "
+        params: List[Any] = []
+        if symbol:
+            sym = symbol.upper()
+            sql += " AND (a=? OR b=?) "
+            params.extend([sym, sym])
+        if window:
+            sql += " AND window=? "
+            params.append(window)
+        sql += " ORDER BY pair_key ASC, window ASC "
+        with self._connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+            return [self._row_to_relation(r) for r in rows]
+
+    @staticmethod
+    def _row_to_relation(row: Any) -> RelationMetric:
+        return RelationMetric(
+            pair_key=row["pair_key"],
+            a=row["a"],
+            b=row["b"],
+            window=row["window"],
+            corr=row["corr"],
+            lead_symbol=row["lead_symbol"],
+            lag_days=row["lag_days"],
+            corr_source=row["corr_source"] or "static_only",
+            sample_size=row["sample_size"] or 0,
+            updated_at=row["updated_at"],
+        )
+
+    # ─── 人工记忆 notes（阶段 5） ───
+
+    def write_note(self, symbol: Optional[str], content: str, author: str = "") -> int:
+        """人工写入/修正记忆（前端可编辑，与 LLM 产出的 semantic 分开存）。"""
+        with self._connect() as conn:
+            cur = conn.execute(
+                "INSERT INTO notes (symbol, content, created_at, author) VALUES (?, ?, ?, ?)",
+                (
+                    symbol.upper() if symbol else None,
+                    content,
+                    datetime.now().isoformat(timespec="seconds"),
+                    author,
+                ),
+            )
+            return cur.lastrowid or 0
+
+    def list_notes(self, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
+        sql = "SELECT * FROM notes WHERE 1=1 "
+        params: List[Any] = []
+        if symbol:
+            sql += " AND symbol=? "
+            params.append(symbol.upper())
+        sql += " ORDER BY id DESC "
+        with self._connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+            return [dict(r) for r in rows]
+
+    def delete_note(self, note_id: int) -> bool:
+        """只允许删人工记忆（notes 表），LLM 产出的 semantic 走 archived 不删。"""
+        with self._connect() as conn:
+            cur = conn.execute("DELETE FROM notes WHERE id=?", (note_id,))
+            return cur.rowcount > 0
 
     # ─── MemoryInjection 写入（【三评 F】埋点） ───
 

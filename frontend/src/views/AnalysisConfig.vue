@@ -78,6 +78,13 @@
             <span style="margin-left: 8px; color: #909399; font-size: 12px">忽略本地缓存</span>
           </el-form-item>
 
+          <el-form-item label="启用历史记忆">
+            <el-switch v-model="form.useMemory" />
+            <span style="margin-left: 8px; color: #909399; font-size: 12px">
+              注入本品种近期结论、语义记忆与关联品种动态（关闭后本次分析完全无记忆）
+            </span>
+          </el-form-item>
+
           <el-form-item>
             <el-button type="primary" size="large" @click="submitAnalysis" :loading="submitting">
               <el-icon><Promotion /></el-icon> 开始分析
@@ -152,6 +159,12 @@
             <el-switch v-model="scheduledForm.auto_word" />
             <span style="margin-left: 8px; color: #909399; font-size: 12px">保存到 results/auto_reports 目录</span>
           </el-form-item>
+          <el-form-item label="启用历史记忆">
+            <el-switch v-model="scheduledForm.use_memory" />
+            <span style="margin-left: 8px; color: #909399; font-size: 12px">
+              每日任务同样注入记忆上下文（含关联品种）
+            </span>
+          </el-form-item>
           <el-form-item label="独立后台运行">
             <span style="color: #909399; font-size: 12px">
               无人值守场景可使用 <code>backend/run_scheduled_task.py</code> 交由 cron / Windows 任务计划程序定时调用，无需前端页面常驻。
@@ -224,6 +237,7 @@ const form = reactive({
   debateRounds: 3,
   aiModel: '', // 空 = 跟随「LLM 配置」页面的全局模型
   forceRefresh: false,
+  useMemory: true, // 【记忆体系】注入本品种记忆 + 关联品种动态
 })
 
 const scheduledForm = reactive({
@@ -237,6 +251,7 @@ const scheduledForm = reactive({
   auto_email: false,
   auto_word: false,
   update_data_before_analysis: true,
+  use_memory: true, // 【记忆体系】定时任务是否注入记忆
 })
 
 function disableFuture(date) {
@@ -287,6 +302,7 @@ async function submitAnalysis() {
       ai_model: form.aiModel,
       debate_rounds: form.analysisMode === 'complete_flow' ? form.debateRounds : 0,
       force_refresh: form.forceRefresh,
+      use_memory: form.useMemory,
     })
     ElMessage.success('分析任务已提交！')
     router.push('/results')
@@ -354,6 +370,7 @@ onMounted(async () => {
     scheduledForm.auto_word = cfg.auto_word ?? false
     // 🔧 修复：回填自动更新数据开关，此前该字段被忽略导致展示与后端配置不一致
     scheduledForm.update_data_before_analysis = cfg.update_data_before_analysis ?? true
+    scheduledForm.use_memory = cfg.use_memory ?? true
     schedRunning.value = cfg.enabled || false
   }
 })
