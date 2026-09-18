@@ -33,7 +33,8 @@ services:
       # 记忆体系（episodes/semantics/relation_metrics 库，同样落在 futures-data 卷内）
       - MEMORY_DIR=/app/data/qihuo/memory
       - MEMORY_BACKFILL_ENABLED=true
-      - MEMORY_BACKFILL_TIME=20:00
+      # 需晚于定时分析（默认 20:00），否则当天 episode 还没落库就回填
+      - MEMORY_BACKFILL_TIME=21:00
     volumes:
       # 数据持久化（数据库、缓存、日志）
       - futures-data:/app/data

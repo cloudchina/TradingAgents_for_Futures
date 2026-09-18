@@ -17,7 +17,7 @@ import threading
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from loguru import logger
 
@@ -670,6 +670,42 @@ class MemoryService:
                 ),
             )
             return cur.lastrowid or 0
+
+    def injected_semantic_ids(self, run_id: str) -> List[int]:
+        """该 run 实际注入 prompt 的 semantic id（跨 segment 去重）。
+
+        【三评 B】"被注入"的判据是 ContextBuilder 把该 semantic 写进了本次 prompt，
+        与 agent 是否在 memory_refs 里回引无关——否则不回引时永远少计。
+        """
+        if not run_id:
+            return []
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT semantic_ids FROM memory_injections WHERE run_id=?", (run_id,)
+            ).fetchall()
+        ids: Set[int] = set()
+        for r in rows:
+            try:
+                ids.update(int(i) for i in json.loads(r["semantic_ids"] or "[]"))
+            except Exception:
+                continue
+        return sorted(ids)
+
+    def bump_semantic_invocations(self, semantic_ids: List[int], failed: bool = False) -> int:
+        """批量累加：每条注入过的 semantic 的 invoked_count += 1；hit=False 时
+        failed_invocations 也 +1（降级判据的分子）。"""
+        if not semantic_ids:
+            return 0
+        sql = (
+            "UPDATE semantics SET invoked_count=invoked_count+1, "
+            "failed_invocations=failed_invocations+1 WHERE id=?"
+            if failed
+            else "UPDATE semantics SET invoked_count=invoked_count+1 WHERE id=?"
+        )
+        with self._connect() as conn:
+            for sid in semantic_ids:
+                conn.execute(sql, (sid,))
+        return len(semantic_ids)
 
     # ─── 导出（阶段1 plan：memory_export.json） ───
 

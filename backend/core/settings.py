@@ -47,7 +47,8 @@ class Settings(BaseSettings):
 
     # 【阶段4】复盘回填调度（ScheduledBackfillRunner）
     MEMORY_BACKFILL_ENABLED: bool = Field(default=True, description="启动时自动拉起复盘回填调度")
-    MEMORY_BACKFILL_TIME: str = Field(default="20:00", description="每日回填触发时间 HH:MM")
+    # 【三评 K】默认 21:00：需晚于定时分析（默认 20:00），否则当天 episode 还没写完就回填
+    MEMORY_BACKFILL_TIME: str = Field(default="21:00", description="每日回填触发时间 HH:MM")
 
     # 系统配置
     DEFAULT_DAYS_BACK: int = Field(default=3, description="默认回溯天数")

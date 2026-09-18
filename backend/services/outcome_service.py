@@ -28,6 +28,7 @@ from loguru import logger
 from core.settings import get_memory_path, settings
 from models.memory import Episode, EpisodeStatus
 from services.memory_service import (
+    SEMANTIC_DOWNGRADE_FAIL_RATIO,
     SEMANTIC_DOWNGRADE_MIN_INVOKED,
     SEMANTIC_MIN_CONFIDENCE,
     SEMANTIC_MIN_EVIDENCE,
@@ -364,6 +365,10 @@ class OutcomeService:
             self.svc.update_outcome(ep.id, outcome, EpisodeStatus.RESOLVED.value)
             stats["resolved"] += 1
             bucket["resolved"] += 1
+            # 【三评 B】回填出结果后，按"本次注入了哪些 semantic"累加 invoked_count，
+            # hit=False 才算一次失败注入（降级判据的分子/分母由此而来）
+            bumped = self._bump_injections(ep, outcome)
+            stats["invocations_bumped"] = stats.get("invocations_bumped", 0) + bumped
 
         logger.info(
             f"[outcome] 回填完成 scanned={stats['scanned']} "
@@ -371,6 +376,21 @@ class OutcomeService:
             f"not_due={stats['not_due']}"
         )
         return stats
+
+    def _bump_injections(self, ep: Episode, outcome: Dict[str, Any]) -> int:
+        """【三评 B】把本次注入的 semantic × 本次 outcome.hit 回写到 invoked_count。
+
+        触发点是 ContextBuilder 把该 semantic 写入了本次 prompt（memory_injections 埋点），
+        与 agent 是否在 memory_refs 中回引无关；否则不回引时永远少计，降级统计失真。
+        """
+        run_id = getattr(ep, "run_id", "") or ""
+        if not run_id:
+            return 0
+        semantic_ids = self.svc.injected_semantic_ids(run_id)
+        if not semantic_ids:
+            return 0
+        hit = outcome.get("hit")
+        return self.svc.bump_semantic_invocations(semantic_ids, failed=(hit is False))
 
     def _resolve_one(self, ep: Episode, target: str) -> Optional[Dict[str, Any]]:
         """算单条 episode 的 outcome；取不到价格返回 None。"""
@@ -564,9 +584,17 @@ class OutcomeService:
                 1 for e in sub if isinstance(e.outcome, dict) and e.outcome.get("hit")
             ) / cnt
 
-        result = {"scanned": 0, "promoted": 0, "activated": 0, "skipped": 0}
+        result = {"scanned": 0, "promoted": 0, "activated": 0, "skipped": 0, "downgraded": 0}
         semantics = self.svc.list_semantics(symbol=(symbol.upper() if symbol else None))
         for sem in semantics:
+            # 【三评 B】降级：注入失败率过高 → 归档，停止注入。
+            # 分子分母同一总体（注入次数），且要求最小注入次数 ≥ 5 才触发，避免小样本误杀。
+            if sem.status == "active" and sem.invoked_count >= SEMANTIC_DOWNGRADE_MIN_INVOKED:
+                ratio = sem.failed_invocations / max(1, sem.invoked_count)
+                if ratio > SEMANTIC_DOWNGRADE_FAIL_RATIO:
+                    self.svc.update_semantic_status(sem.id, "archived")
+                    result["downgraded"] += 1
+                    continue
             if sem.status not in ("draft", "pending"):
                 continue
             result["scanned"] += 1
