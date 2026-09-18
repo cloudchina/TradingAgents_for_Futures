@@ -44,6 +44,8 @@ export const dataApi = {
     api.post(`/data/update/${moduleKey}`, null, { params }),
   listDataTasks: () => api.get('/data/tasks'),
   getDataTask: (taskId) => api.get(`/data/tasks/${taskId}`),
+  // 【三评 G】全品种批量更新：按品种并发 + 断点续传 + 失败重试（同样是任务化）
+  bulkUpdate: (params = {}) => api.post('/data/bulk-update', null, { params }),
 }
 
 // ====== LLM 配置 API（运行时热更新，保存后无需重启） ======

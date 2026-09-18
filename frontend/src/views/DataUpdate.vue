@@ -133,6 +133,65 @@
         <div v-if="currentTask.details" class="log-details">{{ currentTask.details }}</div>
       </el-card>
 
+      <!-- 全品种批量更新（三评 G：并发 + 断点续传 + 失败重试） -->
+      <el-card shadow="never" class="bulk-card">
+        <template #header>
+          <div class="card-header">
+            <span>⚡ 全品种批量更新（并发 + 断点续传）</span>
+            <el-tag size="small" type="warning">阶段 0 首轮采集用</el-tag>
+          </div>
+        </template>
+        <el-form :inline="true">
+          <el-form-item label="模块">
+            <el-select
+              v-model="bulkModules"
+              multiple
+              collapse-tags
+              collapse-tags-tooltip
+              placeholder="默认全部模块"
+              style="width: 320px"
+            >
+              <el-option
+                v-for="item in updateItems"
+                :key="item.key"
+                :label="item.name"
+                :value="item.key"
+              />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="并发品种数">
+            <el-input-number v-model="bulkWorkers" :min="1" :max="8" size="small" />
+          </el-form-item>
+          <el-form-item label="断点续传">
+            <el-switch v-model="bulkResume" />
+          </el-form-item>
+          <el-form-item label="强制重跑">
+            <el-switch v-model="bulkForce" />
+          </el-form-item>
+          <el-form-item>
+            <el-button
+              type="primary"
+              :loading="bulkSubmitting"
+              :disabled="taskRunning && !bulkSubmitting"
+              @click="handleBulkUpdate"
+            >
+              批量更新
+            </el-button>
+          </el-form-item>
+        </el-form>
+        <div class="task-meta">
+          按品种并发（上限 8，避免 akshare 限流）；已有数据的品种自动跳过，失败的品种
+          集中重试 2 次后列入失败清单，可只重试这批。
+        </div>
+        <div v-if="failedSymbols.length" class="task-meta">
+          上次失败品种：
+          <el-button size="small" type="warning" @click="retryFailedSymbols">
+            一键重试 {{ failedSymbols.length }} 个
+          </el-button>
+          <span class="log-details">{{ failedSymbols.join(' ') }}</span>
+        </div>
+      </el-card>
+
       <!-- 模块更新按钮 -->
       <el-row :gutter="16">
         <el-col :span="8" v-for="item in updateItems" :key="item.key">
@@ -293,6 +352,45 @@ async function handleUpdate(moduleKey) {
   }
 }
 
+// ================= 全品种批量更新（三评 G） =================
+const bulkModules = ref([])
+const bulkWorkers = ref(6)
+const bulkResume = ref(true)
+const bulkForce = ref(false)
+const bulkSubmitting = ref(false)
+const failedSymbols = ref([])
+
+async function handleBulkUpdate() {
+  if (taskRunning.value) {
+    ElMessage.info(`已有任务（${currentTask.value.module_name}）正在运行，请等待完成后再试`)
+    return
+  }
+  bulkSubmitting.value = true
+  const params = {
+    target_date: targetDate.value,
+    max_workers: bulkWorkers.value,
+    resume: bulkResume.value,
+    force: bulkForce.value,
+  }
+  if (bulkModules.value.length) params.modules = bulkModules.value.join(',')
+  if (selectedVarieties.value.length) params.varieties = selectedVarieties.value.join(',')
+  try {
+    const result = await dataApi.bulkUpdate(params)
+    if (!result || !result.task_id) throw new Error('后端未返回任务 ID')
+    startPolling(result.task)
+  } catch (e) {
+    bulkSubmitting.value = false
+    ElMessage.error('提交批量更新失败，请确认后端服务正常')
+  }
+}
+
+async function retryFailedSymbols() {
+  if (!failedSymbols.value.length) return
+  selectedVarieties.value = [...failedSymbols.value]
+  bulkResume.value = false
+  await handleBulkUpdate()
+}
+
 // ================= 后台任务轮询 =================
 function startPolling(task) {
   stopPolling()
@@ -322,7 +420,8 @@ async function pollTaskOnce() {
   try {
     const t = await dataApi.getDataTask(task.task_id)
     currentTask.value = t
-    if (t.status === 'success' || t.status === 'failed') {
+    // partial = 批量更新部分品种失败（已完成，不再轮询）
+    if (['success', 'failed', 'partial'].includes(t.status)) {
       await handleTaskFinished(t)
     }
   } catch (e) {
@@ -345,11 +444,16 @@ async function handleTaskFinished(t) {
   })
   if (t.status === 'success') {
     ElMessage.success(`${moduleName}更新完成：${t.message || ''}`)
+  } else if (t.status === 'partial') {
+    ElMessage.warning(`${moduleName}部分完成：${t.message || ''}（见下方失败品种，可一键重试）`)
   } else {
     ElMessage.error(`${moduleName}更新失败：${t.message || ''}`)
   }
   updating.value = ''
   refreshingContracts.value = false
+  bulkSubmitting.value = false
+  // 批量更新：把失败品种留下来，供"一键重试"
+  failedSymbols.value = t.failed_symbols || []
   // 完成后刷新品种数据状态（主力合约/数据状态列）
   await loadCommodities()
 }

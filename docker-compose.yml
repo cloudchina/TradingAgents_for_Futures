@@ -30,6 +30,10 @@ services:
       - CACHE_DIR=/app/data/qihuo/cache/analysis
       - RESULTS_DIR=/app/data/qihuo/trading_agents_results
       - LOGS_DIR=/app/data/logs
+      # 记忆体系（episodes/semantics/relation_metrics 库，同样落在 futures-data 卷内）
+      - MEMORY_DIR=/app/data/qihuo/memory
+      - MEMORY_BACKFILL_ENABLED=true
+      - MEMORY_BACKFILL_TIME=20:00
     volumes:
       # 数据持久化（数据库、缓存、日志）
       - futures-data:/app/data

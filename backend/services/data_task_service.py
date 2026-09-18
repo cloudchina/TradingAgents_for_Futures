@@ -25,6 +25,7 @@ from loguru import logger
 
 from services.data_service import MODULE_CONFIG, data_manager_service
 from services.commodity_service import commodity_service
+from services.bulk_update_service import bulk_update_service
 
 # 任务保留条数（超出后清理最早的历史任务）
 MAX_KEEP_TASKS = 50
@@ -77,6 +78,48 @@ class DataTaskService:
             args=(task["task_id"], module_key, target_date, varieties),
             daemon=True,
             name=f"data-update-{module_key}",
+        ).start()
+        return task, False
+
+    def submit_bulk_update(
+        self,
+        module_keys: List[str],
+        varieties: Optional[List[str]] = None,
+        target_date: str = None,
+        max_workers: int = 6,
+        resume: bool = True,
+        force: bool = False,
+        retries: int = 2,
+    ) -> tuple[dict, bool]:
+        """【三评 G】全品种批量更新：按品种并发 + 断点续传 + 失败重试。
+
+        与 submit_update 的差异：单品种 update_to_date 是串行遍历，59 品种要跑几小时；
+        本方法按品种维度并发（默认 6 路），已成功的品种自动跳过，失败的集中重试。
+        """
+        with self._lock:
+            active_task = self._get_active_unlocked()
+            if active_task is not None:
+                return active_task, True
+            task = self._new_task(
+                kind="bulk_update",
+                module_key=",".join(module_keys),
+                module_name="批量更新(" + ",".join(MODULE_CONFIG.get(m, {}).get("display_name", m)
+                                                   for m in module_keys) + ")",
+                target_date=target_date or _now()[:10],
+                variety_count=len(varieties) if varieties else None,
+            )
+            task["modules"] = list(module_keys)
+            task["max_workers"] = max_workers
+            task["failed_symbols"] = []
+            self._tasks[task["task_id"]] = task
+            self._active = task["task_id"]
+            self._prune_unlocked()
+        threading.Thread(
+            target=self._execute_bulk,
+            args=(task["task_id"], module_keys, varieties, target_date,
+                  max_workers, resume, force, retries),
+            daemon=True,
+            name="data-bulk-update",
         ).start()
         return task, False
 
@@ -199,6 +242,55 @@ class DataTaskService:
             logger.exception(f"[task {task_id}] update {module_key} 异常")
             task["status"] = "failed"
             task["message"] = "数据更新异常"
+            task["details"] = str(exc)[:1000]
+            task["stage"] = "异常"
+        finally:
+            self._finalize(task_id, task)
+
+    def _execute_bulk(
+        self,
+        task_id: str,
+        module_keys: List[str],
+        varieties: Optional[List[str]],
+        target_date: str,
+        max_workers: int,
+        resume: bool,
+        force: bool,
+        retries: int,
+    ) -> None:
+        """批量更新执行体（在后台线程中运行）。"""
+        task = self._tasks.get(task_id)
+        if task is None:
+            return
+        cb = self._progress_fn(task)
+        try:
+            task["stage"] = "批量更新启动（并发 + 断点续传）…"
+            result = bulk_update_service.run_modules(
+                module_keys,
+                symbols=varieties,
+                target_date=target_date,
+                max_workers=max_workers,
+                resume=resume,
+                force=force,
+                retries=retries,
+                progress_cb=cb,
+            )
+            failed = result.get("failed_symbols", [])
+            task["failed_symbols"] = failed
+            task["status"] = "success" if not failed else "partial"
+            ok = sum(len(m.get("updated", [])) for m in result["modules"].values())
+            skip = sum(len(m.get("skipped", [])) for m in result["modules"].values())
+            task["message"] = f"更新 {ok} 个品种次，跳过 {skip} 个（已有数据）"
+            task["details"] = (
+                "失败品种: " + ", ".join(failed[:20]) + ("…" if len(failed) > 20 else "")
+                if failed
+                else "无失败品种"
+            )
+            logger.info(f"[task {task_id}] bulk update -> {task['status']}: {task['message']}")
+        except Exception as exc:  # noqa: BLE001
+            logger.exception(f"[task {task_id}] bulk update 异常")
+            task["status"] = "failed"
+            task["message"] = "批量更新异常"
             task["details"] = str(exc)[:1000]
             task["stage"] = "异常"
         finally:

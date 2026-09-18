@@ -87,6 +87,52 @@ async def update_data(
     return {"task_id": task["task_id"], "already_running": already, "message": message, "task": task}
 
 
+@router.post("/bulk-update")
+async def bulk_update(
+    modules: Optional[str] = Query(None, description="模块 key，逗号分隔；不传则全部模块"),
+    target_date: Optional[str] = Query(None, description="目标日期 YYYY-MM-DD"),
+    varieties: Optional[str] = Query(None, description="品种代码，逗号分隔，不传则全部品种"),
+    max_workers: int = Query(6, ge=1, le=8, description="并发品种数（akshare 限速，上限 8）"),
+    resume: bool = Query(True, description="断点续传：已有数据的品种跳过"),
+    force: bool = Query(False, description="强制重跑，无视断点续传"),
+    retries: int = Query(2, ge=0, le=5, description="失败品种单批重试次数"),
+) -> Dict[str, Any]:
+    """【三评 G】全品种批量更新：按品种并发 + 断点续传 + 失败重试。
+
+    与 POST /update/{module_key}（单品种串行、Updater 内部遍历全部品种）互补：
+    阶段 0 首轮采集 59 品种 × 7 模块时用它，避免跑几小时且中途失败要重来。
+    仍走后台任务 + 轮询（GET /api/data/tasks/{task_id}）。
+    """
+    if modules:
+        module_list = [m.strip() for m in modules.split(",") if m.strip()]
+        invalid = [m for m in module_list if m not in VALID_MODULES]
+        if invalid:
+            raise HTTPException(status_code=400, detail=f"无效模块: {', '.join(invalid)}")
+    else:
+        module_list = list(VALID_MODULES)
+
+    variety_list = None
+    if varieties:
+        variety_list = [v.strip().upper() for v in varieties.split(",") if v.strip()]
+
+    task, already = data_task_service.submit_bulk_update(
+        module_list,
+        varieties=variety_list,
+        target_date=target_date,
+        max_workers=max_workers,
+        resume=resume,
+        force=force,
+        retries=retries,
+    )
+    message = (
+        f"已有任务在运行（{task['module_name']}），已自动跟踪该任务，无需重复提交"
+        if already
+        else f"批量更新任务已提交：{task['module_name']}（并发 {max_workers} 路，"
+             f"{'断点续传' if resume and not force else '全量重跑'}）"
+    )
+    return {"task_id": task["task_id"], "already_running": already, "message": message, "task": task}
+
+
 @router.get("/tasks")
 async def list_update_tasks(
     limit: int = Query(10, ge=1, le=50, description="返回最近任务条数"),
